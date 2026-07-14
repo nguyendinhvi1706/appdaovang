@@ -1,0 +1,178 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String         @id @default(cuid())
+  email       String         @unique
+  password    String
+  name        String?
+  createdAt   DateTime       @default(now())
+  mt5Accounts Mt5Account[]
+  watchlist   WatchlistItem[]
+  journal     JournalEntry[]
+  sharedItems SharedItem[]
+  sharedLikes SharedLike[]
+  marketItems MarketItem[]
+  marketRatings MarketRating[]
+  aiSetups    AiSetup[]
+}
+
+model Mt5Account {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label     String
+  login     String
+  server    String
+  broker    String?
+  currency  String   @default("USD")
+  balance   Float    @default(0)
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model WatchlistItem {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  symbol    String
+  note      String?
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, symbol])
+}
+
+enum Direction {
+  BUY
+  SELL
+}
+
+enum TradeResult {
+  WIN
+  LOSS
+  BREAKEVEN
+  OPEN
+}
+
+model JournalEntry {
+  id          String      @id @default(cuid())
+  userId      String
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  symbol      String
+  direction   Direction
+  entryPrice  Float
+  exitPrice   Float?
+  lotSize     Float
+  stopLoss    Float?
+  takeProfit  Float?
+  result      TradeResult @default(OPEN)
+  pnl         Float?
+  emotion     String?
+  mistakes    String?
+  notes       String?
+  imageBefore String?
+  imageAfter  String?
+  openedAt    DateTime    @default(now())
+  closedAt    DateTime?
+  createdAt   DateTime    @default(now())
+}
+
+enum SharedType {
+  STRATEGY
+  TEMPLATE
+  INDICATOR
+  JOURNAL
+  BACKTEST
+}
+
+model SharedItem {
+  id          String       @id @default(cuid())
+  authorId    String
+  author      User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  type        SharedType
+  title       String
+  description String?
+  content     String       // JSON hoặc text/code tùy loại
+  downloads   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  likes       SharedLike[]
+}
+
+model SharedLike {
+  id     String     @id @default(cuid())
+  userId String
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  itemId String
+  item   SharedItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, itemId])
+}
+
+enum MarketCategory {
+  INDICATOR
+  EA
+  TEMPLATE
+  SCRIPT
+  AI_PROMPT
+  JOURNAL
+}
+
+model MarketItem {
+  id          String         @id @default(cuid())
+  authorId    String
+  author      User           @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  category    MarketCategory
+  title       String
+  description String?
+  content     String         // hướng dẫn sử dụng / nội dung prompt / mô tả
+  fileUrl     String?        // file đính kèm (.mq5, .ex5, .zip...)
+  fileName    String?
+  version     String         @default("1.0")
+  downloads   Int            @default(0)
+  createdAt   DateTime       @default(now())
+  ratings     MarketRating[]
+}
+
+model MarketRating {
+  id     String     @id @default(cuid())
+  userId String
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  itemId String
+  item   MarketItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  stars  Int
+
+  @@unique([userId, itemId])
+}
+
+enum SetupStatus {
+  PENDING
+  RUNNING
+  WIN
+  LOSS
+  CANCELLED
+}
+
+model AiSetup {
+  id          String      @id @default(cuid())
+  userId      String
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  symbol      String
+  direction   Direction
+  entry       Float
+  sl          Float
+  tp          Float
+  rr          Float
+  reasoning   String
+  source      String      @default("AI") // AI hoặc ALGO (thuật toán dự phòng)
+  status      SetupStatus @default(PENDING)
+  createdAt   DateTime    @default(now())
+  triggeredAt DateTime?
+  closedAt    DateTime?
+}

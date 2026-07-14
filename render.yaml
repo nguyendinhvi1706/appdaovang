@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: appdaovang-api
+    runtime: node
+    plan: free
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter api prisma generate && pnpm --filter api build
+    startCommand: cd apps/api && npx prisma migrate deploy && node dist/main.js
+    envVars:
+      - key: DATABASE_URL
+        sync: false # dán connection string từ Neon
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: CORS_ORIGIN
+        sync: false # URL Vercel của bạn, VD: https://appdaovang.vercel.app
+      - key: AI_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: AI_MODEL
+        value: llama-3.3-70b-versatile
+      - key: AI_API_KEY
+        sync: false # key miễn phí từ console.groq.com
