@@ -27,9 +27,10 @@ export class AiService {
     return 'XAUUSD';
   }
 
-  private async buildMarketContext(symbol: string): Promise<{ text: string; price: number | null }> {
+  private async buildMarketContext(symbol: string, intraday: '15m' | '1h' = '1h'): Promise<{ text: string; price: number | null }> {
+    const tag = intraday === '15m' ? 'M15' : 'H1';
     const [h1, d1, spot] = await Promise.all([
-      this.market.candles(symbol, '1h').catch(() => [] as Candle[]),
+      this.market.candles(symbol, intraday).catch(() => [] as Candle[]),
       this.market.candles(symbol, '1d').catch(() => [] as Candle[]),
       this.market.quote(symbol).catch(() => null),
     ]);
@@ -57,10 +58,10 @@ export class AiService {
       const closes = h1.map((c) => c.close);
       const { supports, resistances } = swingLevels(h1);
       lines.push(
-        `[Khung H1] EMA20: ${ema(closes, 20)} | EMA50: ${ema(closes, 50)} | RSI14: ${rsi(closes)} | ATR14: ${atr(h1)}`,
-        `[H1] Kháng cự gần: ${resistances.slice(0, 3).map((x) => x.toFixed(4)).join(', ') || 'n/a'}`,
-        `[H1] Hỗ trợ gần: ${supports.slice(0, 3).map((x) => x.toFixed(4)).join(', ') || 'n/a'}`,
-        `[H1] 10 nến gần nhất (O/H/L/C): ${h1.slice(-10).map((c) => `${c.open.toFixed(2)}/${c.high.toFixed(2)}/${c.low.toFixed(2)}/${c.close.toFixed(2)}`).join(' | ')}`,
+        `[Khung ${tag}] EMA20: ${ema(closes, 20)} | EMA50: ${ema(closes, 50)} | RSI14: ${rsi(closes)} | ATR14: ${atr(h1)}`,
+        `[${tag}] Kháng cự gần: ${resistances.slice(0, 3).map((x) => x.toFixed(4)).join(', ') || 'n/a'}`,
+        `[${tag}] Hỗ trợ gần: ${supports.slice(0, 3).map((x) => x.toFixed(4)).join(', ') || 'n/a'}`,
+        `[${tag}] 10 nến gần nhất (O/H/L/C): ${h1.slice(-10).map((c) => `${c.open.toFixed(2)}/${c.high.toFixed(2)}/${c.low.toFixed(2)}/${c.close.toFixed(2)}`).join(' | ')}`,
       );
     }
     if (d1.length) {
@@ -265,9 +266,9 @@ export class AiService {
   async createSetup(userId: string, symbolRaw: string) {
     const symbol = symbolRaw.toUpperCase();
     const [h1, spotQ, market] = await Promise.all([
-      this.market.candles(symbol, '1h').catch(() => [] as Candle[]),
+      this.market.candles(symbol, '15m').catch(() => [] as Candle[]),
       this.market.quote(symbol).catch(() => null),
-      this.buildMarketContext(symbol),
+      this.buildMarketContext(symbol, '15m'),
     ]);
     const spot = spotQ?.price ?? market.price;
     if (spot == null || h1.length < 60) {
@@ -293,7 +294,7 @@ export class AiService {
       { role: 'system', content: 'Bạn là chuyên gia phân tích kỹ thuật. Trả lời DUY NHẤT một khối JSON hợp lệ, không markdown, không văn bản nào khác.' },
       {
         role: 'user',
-        content: `${market.text}\n\nGiá ${symbol} HIỆN TẠI: ${spot}. Đề xuất 1 setup giao dịch.\nTrả về JSON: {"direction":"BUY" hoặc "SELL","entry":số,"sl":số,"tp":số,"reasoning":"lý do ngắn gọn tiếng Việt, nêu rõ căn cứ EMA/RSI/hỗ trợ/kháng cự"}\nRàng buộc: entry trong ±2% giá hiện tại; BUY thì sl<entry<tp, SELL thì tp<entry<sl; RR từ 1 đến 5.`,
+        content: `${market.text}\n\nGiá ${symbol} HIỆN TẠI: ${spot}. Đề xuất 1 setup giao dịch NGẮN HẠN theo khung M15 — SL/TP bám sát cấu trúc M15, không lấy mức của khung lớn.\nTrả về JSON: {"direction":"BUY" hoặc "SELL","entry":số,"sl":số,"tp":số,"reasoning":"lý do ngắn gọn tiếng Việt, nêu rõ căn cứ EMA/RSI/hỗ trợ/kháng cự"}\nRàng buộc: entry trong ±2% giá hiện tại; BUY thì sl<entry<tp, SELL thì tp<entry<sl; RR từ 1 đến 5.`,
       },
     ], 0.2);
     if (raw) {
@@ -319,7 +320,7 @@ export class AiService {
       const tp = bull ? entry + dist * 2 : entry - dist * 2;
       plan = {
         direction: bull ? 'BUY' : 'SELL', entry, sl, tp,
-        reasoning: `(Thuật toán — AI không trả kế hoạch hợp lệ) EMA20 ${bull ? '>' : '<'} EMA50 trên H1 → xu hướng ${bull ? 'tăng' : 'giảm'}. RSI14: ${r}. Entry tại giá hiện tại, SL = 1.5×ATR (${a.toFixed(2)}), TP theo RR 1:2. ⚠️ Chỉ tham khảo.`,
+        reasoning: `(Thuật toán — AI không trả kế hoạch hợp lệ) EMA20 ${bull ? '>' : '<'} EMA50 trên M15 → xu hướng ${bull ? 'tăng' : 'giảm'}. RSI14: ${r}. Entry tại giá hiện tại, SL = 1.5×ATR (${a.toFixed(2)}), TP theo RR 1:2. ⚠️ Chỉ tham khảo.`,
         source: 'ALGO',
       };
     }
