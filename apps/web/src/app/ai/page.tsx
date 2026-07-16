@@ -106,6 +106,7 @@ function SetupsTab() {
   const [creating, setCreating] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -120,10 +121,14 @@ function SetupsTab() {
   useEffect(() => { load(); }, [load]);
 
   async function create() {
-    setCreating(true); setError('');
+    setCreating(true); setError(''); setNotice('');
     try {
-      await api('/ai/setup', { method: 'POST', body: JSON.stringify({ symbol }) });
-      load();
+      const res = await api<any>('/ai/setup', { method: 'POST', body: JSON.stringify({ symbol }) });
+      if (res?.noTrade) {
+        setNotice(res.reason);
+      } else {
+        load();
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -160,6 +165,11 @@ function SetupsTab() {
           )}
         </div>
         {error && <p className="text-sm text-red-400 mt-2">{error}</p>}
+        {notice && (
+          <p className="text-sm text-yellow-400 mt-2 border border-yellow-400/30 rounded-lg p-3 bg-yellow-400/5">
+            ✋ Đứng ngoài: {notice}
+          </p>
+        )}
         <p className="text-xs text-gray-500 mt-2">
           AI đề xuất Entry/SL/TP từ dữ liệu thật → hệ thống tự theo dõi giá: khớp entry → đang chạy → chạm TP thắng / chạm SL thua. Không đặt lệnh thật.
         </p>

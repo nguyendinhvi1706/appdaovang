@@ -265,8 +265,9 @@ export class AiService {
 
   async createSetup(userId: string, symbolRaw: string) {
     const symbol = symbolRaw.toUpperCase();
-    const [h1, spotQ, market] = await Promise.all([
+    const [h1, h1c, spotQ, market] = await Promise.all([
       this.market.candles(symbol, '15m').catch(() => [] as Candle[]),
+      this.market.candles(symbol, '1h').catch(() => [] as Candle[]),
       this.market.quote(symbol).catch(() => null),
       this.buildMarketContext(symbol, '15m'),
     ]);
@@ -274,6 +275,13 @@ export class AiService {
     if (spot == null || h1.length < 60) {
       throw new ServiceUnavailableException(`Không đủ dữ liệu thị trường cho ${symbol}.`);
     }
+
+    // Bộ lọc xu hướng khung lớn: EMA20 vs EMA50 trên H1
+    const h1Closes = h1c.map((c) => c.close);
+    const h1e20 = ema(h1Closes, 20);
+    const h1e50 = ema(h1Closes, 50);
+    const h1Trend: 'TĂNG' | 'GIẢM' | null =
+      h1e20 != null && h1e50 != null ? (h1e20 >= h1e50 ? 'TĂNG' : 'GIẢM') : null;
 
     type Plan = { direction: 'BUY' | 'SELL'; entry: number; sl: number; tp: number; reasoning: string; source: string };
     const validate = (p: any): p is Plan => {
@@ -294,7 +302,7 @@ export class AiService {
       { role: 'system', content: 'Bạn là chuyên gia phân tích kỹ thuật. Trả lời DUY NHẤT một khối JSON hợp lệ, không markdown, không văn bản nào khác.' },
       {
         role: 'user',
-        content: `${market.text}\n\nGiá ${symbol} HIỆN TẠI: ${spot}. Đề xuất 1 setup giao dịch NGẮN HẠN theo khung M15 — SL/TP bám sát cấu trúc M15, không lấy mức của khung lớn.\nTrả về JSON: {"direction":"BUY" hoặc "SELL","entry":số,"sl":số,"tp":số,"reasoning":"lý do ngắn gọn tiếng Việt, nêu rõ căn cứ EMA/RSI/hỗ trợ/kháng cự"}\nRàng buộc: entry trong ±2% giá hiện tại; BUY thì sl<entry<tp, SELL thì tp<entry<sl; RR từ 1 đến 5.`,
+        content: `${market.text}\n\nGiá ${symbol} HIỆN TẠI: ${spot}. XU HƯỚNG H1: ${h1Trend ?? 'không rõ'}.\nĐề xuất 1 setup NGẮN HẠN khung M15 — SL/TP bám cấu trúc M15.\nQUY TẮC QUAN TRỌNG:\n1. Ưu tiên giao dịch THEO xu hướng H1 (${h1Trend ?? '?'}). Chỉ đi ngược khi có tín hiệu đảo chiều RẤT rõ (nêu cụ thể trong reasoning).\n2. Nếu thị trường nhiễu, RSI quá mua/quá bán ngược hướng, hoặc không có setup xác suất cao → ĐỪNG ép lệnh, trả về {"direction":"NONE","reasoning":"lý do đứng ngoài"}. Đứng ngoài cũng là một quyết định tốt.\nTrả về JSON: {"direction":"BUY"|"SELL"|"NONE","entry":số,"sl":số,"tp":số,"reasoning":"tiếng Việt, nêu căn cứ EMA/RSI/hỗ trợ/kháng cự"}\nRàng buộc khi có lệnh: entry trong ±2% giá hiện tại; BUY thì sl<entry<tp, SELL thì tp<entry<sl; RR từ 1 đến 5.`,
       },
     ], 0.2);
     if (raw) {
@@ -302,6 +310,9 @@ export class AiService {
       if (m) {
         try {
           const j = JSON.parse(m[0]);
+          if (j.direction === 'NONE') {
+            return { noTrade: true, reason: String(j.reasoning ?? 'AI đánh giá chưa có setup xác suất cao — nên đứng ngoài.') };
+          }
           const cand = { direction: j.direction, entry: +j.entry, sl: +j.sl, tp: +j.tp, reasoning: String(j.reasoning ?? ''), source: 'AI' };
           if (validate(cand)) plan = cand;
         } catch {}
@@ -314,6 +325,20 @@ export class AiService {
       const r = rsi(closes);
       const a = atr(h1) ?? spot * 0.005;
       const bull = e20 >= e50;
+      // Không vào lệnh khi M15 ngược xu hướng H1 — nguyên nhân chính của chuỗi thua ngược trend
+      if (h1Trend && (h1Trend === 'TĂNG') !== bull) {
+        return {
+          noTrade: true,
+          reason: `M15 đang ${bull ? 'tăng' : 'giảm'} nhưng xu hướng H1 là ${h1Trend} — hai khung mâu thuẫn, thuật toán khuyên đứng ngoài chờ đồng thuận.`,
+        };
+      }
+      // Không đu lệnh khi RSI đã cực trị theo hướng vào
+      if (r != null && ((bull && r > 72) || (!bull && r < 28))) {
+        return {
+          noTrade: true,
+          reason: `RSI M15 = ${r} đang quá ${bull ? 'mua' : 'bán'} — vào ${bull ? 'BUY' : 'SELL'} lúc này dễ dính điều chỉnh, chờ giá hồi về vùng hợp lý.`,
+        };
+      }
       const dist = a * 1.5;
       const entry = spot;
       const sl = bull ? entry - dist : entry + dist;
