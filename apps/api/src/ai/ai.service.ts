@@ -283,6 +283,16 @@ export class AiService {
     const h1Trend: 'TĂNG' | 'GIẢM' | null =
       h1e20 != null && h1e50 != null ? (h1e20 >= h1e50 ? 'TĂNG' : 'GIẢM') : null;
 
+    // Nến lệch giá thật → EMA/RSI đang tính trên dữ liệu sai, tuyệt đối không ra tín hiệu
+    const lastClose = h1[h1.length - 1].close;
+    const divergePct = Math.abs(lastClose - spot) / spot * 100;
+    if (divergePct > 0.5) {
+      return {
+        noTrade: true,
+        reason: `Dữ liệu nến đang trễ/lệch ${divergePct.toFixed(2)}% so với giá thật (nến M15: ${lastClose.toFixed(2)}, spot: ${spot}) — không tạo setup để tránh tín hiệu sai hàng loạt. Thử lại sau vài phút.`,
+      };
+    }
+
     type Plan = { direction: 'BUY' | 'SELL'; entry: number; sl: number; tp: number; reasoning: string; source: string };
     const validate = (p: any): p is Plan => {
       if (!p || (p.direction !== 'BUY' && p.direction !== 'SELL')) return false;
@@ -355,7 +365,7 @@ export class AiService {
         userId, symbol,
         direction: plan.direction,
         entry: +plan.entry.toFixed(4), sl: +plan.sl.toFixed(4), tp: +plan.tp.toFixed(4),
-        rr, reasoning: plan.reasoning.slice(0, 2000), source: plan.source,
+        rr, reasoning: `[Xu hướng H1: ${h1Trend ?? 'không rõ'} | nến lệch spot ${divergePct.toFixed(2)}%] ${plan.reasoning}`.slice(0, 2000), source: plan.source,
       },
     });
   }

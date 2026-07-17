@@ -108,6 +108,7 @@ export class MarketService {
         : /^[A-Z]{6}$/.test(clean) ? [`${clean}=X`]
         : [symbol];
 
+      let best: Candle[] | null = null;
       for (const y of candidates) {
         for (const host of ['query1', 'query2']) {
           try {
@@ -133,13 +134,21 @@ export class MarketService {
             // Sort + khử timestamp trùng (Yahoo hay trả nến cuối trùng giờ) — chart sẽ từ chối dữ liệu nếu không xử lý
             out.sort((a, b) => a.time - b.time);
             out = out.filter((x, i) => i === 0 || x.time !== out[i - 1].time);
-            if (out.length >= 30) return out.slice(-500);
+            if (out.length >= 30) {
+              // Nến phải TƯƠI — nguồn treo/trễ sẽ làm EMA tính sai xu hướng
+              const maxAge: Record<string, number> = { '5m': 3 * 3600, '15m': 3 * 3600, '30m': 6 * 3600, '1h': 12 * 3600, '4h': 24 * 3600, '1d': 4 * 86400 };
+              const ageSec = Date.now() / 1000 - out[out.length - 1].time;
+              if (ageSec <= (maxAge[interval] ?? 12 * 3600)) return out.slice(-500);
+              if (!best || out[out.length - 1].time > best[best.length - 1].time) best = out;
+              console.warn(`[candles] ${y} @${host}: nến trễ ${(ageSec / 3600).toFixed(1)}h — thử nguồn khác`);
+            }
           } catch (e: any) {
             console.warn(`[candles] ${y} @${host}: ${e.message}`);
           }
         }
       }
-      return [];
+      // Không nguồn nào tươi (VD: cuối tuần thị trường đóng cửa) → trả nguồn mới nhất có được
+      return best ? best.slice(-500) : [];
     });
   }
 
