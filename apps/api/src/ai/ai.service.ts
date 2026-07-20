@@ -293,6 +293,12 @@ export class AiService {
       };
     }
 
+    // Mức hỗ trợ/kháng cự M15 quy về hệ giá spot (bù basis nếu nến là futures)
+    const offM = spot - lastClose;
+    const srLevels = swingLevels(h1);
+    const supportsSpot = srLevels.supports.map((x) => x + offM);
+    const resistancesSpot = srLevels.resistances.map((x) => x + offM);
+
     type Plan = { direction: 'BUY' | 'SELL'; entry: number; sl: number; tp: number; reasoning: string; source: string };
     const validate = (p: any): p is Plan => {
       if (!p || (p.direction !== 'BUY' && p.direction !== 'SELL')) return false;
@@ -312,7 +318,7 @@ export class AiService {
       { role: 'system', content: 'Bạn là chuyên gia phân tích kỹ thuật. Trả lời DUY NHẤT một khối JSON hợp lệ, không markdown, không văn bản nào khác.' },
       {
         role: 'user',
-        content: `${market.text}\n\nGiá ${symbol} HIỆN TẠI: ${spot}. XU HƯỚNG H1: ${h1Trend ?? 'không rõ'}.\nĐề xuất 1 setup NGẮN HẠN khung M15 — SL/TP bám cấu trúc M15.\nQUY TẮC QUAN TRỌNG:\n1. Ưu tiên giao dịch THEO xu hướng H1 (${h1Trend ?? '?'}). Chỉ đi ngược khi có tín hiệu đảo chiều RẤT rõ (nêu cụ thể trong reasoning).\n2. Nếu thị trường nhiễu, RSI quá mua/quá bán ngược hướng, hoặc không có setup xác suất cao → ĐỪNG ép lệnh, trả về {"direction":"NONE","reasoning":"lý do đứng ngoài"}. Đứng ngoài cũng là một quyết định tốt.\nTrả về JSON: {"direction":"BUY"|"SELL"|"NONE","entry":số,"sl":số,"tp":số,"reasoning":"tiếng Việt, nêu căn cứ EMA/RSI/hỗ trợ/kháng cự"}\nRàng buộc khi có lệnh: entry trong ±2% giá hiện tại; BUY thì sl<entry<tp, SELL thì tp<entry<sl; RR từ 1 đến 5.`,
+        content: `${market.text}\n\nGiá ${symbol} HIỆN TẠI: ${spot}. XU HƯỚNG H1: ${h1Trend ?? 'không rõ'}.\nĐề xuất 1 setup NGẮN HẠN khung M15 — SL/TP bám cấu trúc M15.\nQUY TẮC QUAN TRỌNG:\n1. Ưu tiên giao dịch THEO xu hướng H1 (${h1Trend ?? '?'}). Chỉ đi ngược khi có tín hiệu đảo chiều RẤT rõ (nêu cụ thể trong reasoning).\n2. Nếu thị trường nhiễu, RSI quá mua/quá bán ngược hướng, hoặc không có setup xác suất cao → ĐỪNG ép lệnh, trả về {"direction":"NONE","reasoning":"lý do đứng ngoài"}. Đứng ngoài cũng là một quyết định tốt.\n3. TUYỆT ĐỐI KHÔNG SELL ngay tại vùng hỗ trợ, KHÔNG BUY ngay tại vùng kháng cự. SELL chỉ đặt entry gần kháng cự hoặc sau khi hỗ trợ vừa bị phá vỡ rõ ràng; BUY ngược lại — entry gần hỗ trợ hoặc sau khi phá kháng cự.\nTrả về JSON: {"direction":"BUY"|"SELL"|"NONE","entry":số,"sl":số,"tp":số,"reasoning":"tiếng Việt, nêu căn cứ EMA/RSI/hỗ trợ/kháng cự"}\nRàng buộc khi có lệnh: entry trong ±2% giá hiện tại; BUY thì sl<entry<tp, SELL thì tp<entry<sl; RR từ 1 đến 5.`,
       },
     ], 0.2);
     if (raw) {
@@ -326,6 +332,17 @@ export class AiService {
           const cand = { direction: j.direction, entry: +j.entry, sl: +j.sl, tp: +j.tp, reasoning: String(j.reasoning ?? ''), source: 'AI' };
           if (validate(cand)) plan = cand;
         } catch {}
+      }
+    }
+    // Chặn lỗi logic kinh điển: SELL ngay tại hỗ trợ / BUY ngay tại kháng cự
+    if (plan) {
+      const aRef = atr(h1) ?? spot * 0.003;
+      const nearLv = (levels: number[]) => levels.some((L) => Math.abs(plan!.entry - L) <= 0.6 * aRef);
+      if (
+        (plan.direction === 'SELL' && nearLv(supportsSpot) && !nearLv(resistancesSpot)) ||
+        (plan.direction === 'BUY' && nearLv(resistancesSpot) && !nearLv(supportsSpot))
+      ) {
+        plan = null; // kế hoạch AI phạm nguyên tắc S/R → dùng thuật toán dự phòng (có bộ lọc riêng)
       }
     }
     if (!plan) {
@@ -380,7 +397,22 @@ export class AiService {
       const ageDays = (Date.now() - s.createdAt.getTime()) / 86_400_000;
       const iv = (ageDays > 4 ? '1h' : '5m') as '5m' | '1h';
       const key = `${s.symbol}:${iv}`;
-      if (!cache.has(key)) cache.set(key, await this.market.candles(s.symbol, iv).catch(() => []));
+      if (!cache.has(key)) {
+        let cs = await this.market.candles(s.symbol, iv).catch(() => [] as Candle[]);
+        // Quy nến về cùng hệ giá spot với entry/SL/TP — nguồn futures (GC=F) lệch basis
+        // sẽ làm lệnh chạm TP/SL thật mà hệ thống không nhận ra
+        const q = await this.market.quote(s.symbol).catch(() => null);
+        if (q?.price != null && cs.length) {
+          const off = q.price - cs[cs.length - 1].close;
+          if (Math.abs(off) / q.price > 0.0005) {
+            cs = cs.map((c) => ({
+              time: c.time,
+              open: c.open + off, high: c.high + off, low: c.low + off, close: c.close + off,
+            }));
+          }
+        }
+        cache.set(key, cs);
+      }
       const candles = cache.get(key)!;
       const startTs = Math.floor((s.triggeredAt ?? s.createdAt).getTime() / 1000);
 
