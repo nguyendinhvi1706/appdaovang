@@ -14,6 +14,8 @@ type SmcData = {
   fvgs: Zone[];
   eqLevels: EqLevel[];
   dealingRange: { high: number; low: number; eq: number; fromTime: number } | null;
+  spot?: number | null;
+  offset?: number;
 };
 
 const symbols = ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'BTC-USD'];
@@ -53,6 +55,7 @@ export default function SmcPage() {
   togglesRef.current = toggles;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [info, setInfo] = useState('');
 
   const draw = useCallback(() => {
     const chart = chartRef.current, series = seriesRef.current;
@@ -171,6 +174,11 @@ export default function SmcPage() {
       const data = await api<SmcData>(`/smc/${symbol}?interval=${interval}`);
       dataRef.current = data;
       applyData();
+      setInfo(
+        data.offset
+          ? `Nến đã hiệu chỉnh ${data.offset > 0 ? '+' : ''}${data.offset.toFixed(2)} để khớp giá spot ${data.spot?.toFixed(2) ?? ''}`
+          : data.spot != null ? `Khớp giá spot ${data.spot.toFixed(2)}` : '',
+      );
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -233,6 +241,7 @@ export default function SmcPage() {
         </div>
         {loading && <span className="text-sm text-gray-400">Đang tải...</span>}
         {error && <span className="text-sm text-red-400">{error}</span>}
+        {!loading && !error && info && <span className="text-xs text-gray-500">{info}</span>}
       </div>
 
       <div className="flex gap-3 flex-wrap mb-3 text-sm">
