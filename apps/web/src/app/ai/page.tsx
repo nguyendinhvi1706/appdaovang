@@ -188,6 +188,7 @@ function SetupsTab() {
                   {s.direction === 'BUY' ? '▲ BUY' : '▼ SELL'}
                 </span>
                 <span className={`text-xs px-2 py-0.5 rounded-full border ${cls}`}>{label}</span>
+                {s.source === 'SMC' && <span className="text-xs text-blue-400">(thuật toán · Order Block Retest)</span>}
                 {s.source === 'ALGO' && <span className="text-xs text-gray-500">(thuật toán)</span>}
                 <span className="text-xs text-gray-500 ml-auto">{new Date(s.createdAt).toLocaleString('vi-VN')}</span>
                 {(s.status === 'PENDING' || s.status === 'RUNNING') && (
