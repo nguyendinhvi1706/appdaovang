@@ -171,7 +171,7 @@ function SetupsTab() {
           </p>
         )}
         <p className="text-xs text-gray-500 mt-2">
-          AI đề xuất Entry/SL/TP từ dữ liệu thật → hệ thống tự theo dõi giá: khớp entry → đang chạy → chạm TP thắng / chạm SL thua. Không đặt lệnh thật.
+          Thuật toán SMC (Order Block/FVG + thanh khoản) chốt Entry/SL/TP theo một quy trình cố định, AI chỉ viết lại lý do bằng lời — không tự đổi số. Hệ thống tự theo dõi giá: khớp entry → đang chạy → chạm TP thắng / chạm SL thua. Không đặt lệnh thật.
         </p>
       </div>
 
@@ -188,7 +188,8 @@ function SetupsTab() {
                   {s.direction === 'BUY' ? '▲ BUY' : '▼ SELL'}
                 </span>
                 <span className={`text-xs px-2 py-0.5 rounded-full border ${cls}`}>{label}</span>
-                {s.source === 'SMC' && <span className="text-xs text-blue-400">(thuật toán · Order Block Retest)</span>}
+                {s.source === 'SMC' && <span className="text-xs text-blue-400">(SMC · AI diễn giải)</span>}
+                {s.source === 'SMC-ALGO' && <span className="text-xs text-gray-500">(SMC · lời giải mẫu)</span>}
                 {s.source === 'ALGO' && <span className="text-xs text-gray-500">(thuật toán)</span>}
                 <span className="text-xs text-gray-500 ml-auto">{new Date(s.createdAt).toLocaleString('vi-VN')}</span>
                 {(s.status === 'PENDING' || s.status === 'RUNNING') && (

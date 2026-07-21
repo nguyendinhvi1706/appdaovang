@@ -292,11 +292,8 @@ export class AiService {
       };
     }
 
-    // Mức hỗ trợ/kháng cự M15 quy về hệ giá spot (bù basis nếu nến là futures)
+    // Bù basis nếu nến là futures (GC=F) — quy toàn bộ mức giá SMC bên dưới về hệ giá spot
     const offM = spot - lastClose;
-    const srLevels = swingLevels(h1);
-    const supportsSpot = srLevels.supports.map((x) => x + offM);
-    const resistancesSpot = srLevels.resistances.map((x) => x + offM);
 
     // ============ Phương pháp SMC (Smart Money Concept): cấu trúc, Order Block, FVG, thanh khoản ============
     // Đây là engine đã xây cho Giai đoạn 3 (trang SMC) — giờ tái dùng cho Setup lệnh thay vì chỉ
@@ -336,111 +333,99 @@ export class AiService {
         : 'Chưa phát hiện vùng thanh khoản EQH/EQL rõ ràng.',
     ].join('\n');
 
-    type Plan = { direction: 'BUY' | 'SELL'; entry: number; sl: number; tp: number; reasoning: string; source: string };
-    const validate = (p: any): p is Plan => {
-      if (!p || (p.direction !== 'BUY' && p.direction !== 'SELL')) return false;
-      const nums = [p.entry, p.sl, p.tp].map(Number);
-      if (nums.some((n) => !isFinite(n) || n <= 0)) return false;
-      const [entry, sl, tp] = nums;
-      if (Math.abs(entry - spot) / spot > 0.03) return false;
-      if (p.direction === 'BUY' && !(sl < entry && entry < tp)) return false;
-      if (p.direction === 'SELL' && !(tp < entry && entry < sl)) return false;
-      const rr = Math.abs(tp - entry) / Math.abs(entry - sl);
-      return rr >= 0.5 && rr <= 10;
-    };
+    // ============ Thuật toán quyết định số liệu — MỘT nguồn sự thật duy nhất ============
+    // Trước đây để AI tự "nghĩ" cả entry/SL/TP bằng văn xuôi JSON: model yếu hay liệt kê nhiều
+    // vùng thanh khoản rồi đổi ý giữa chừng (chain-of-thought rò rỉ vào câu trả lời), dẫn tới lời
+    // giải thích không khớp con số hiển thị, và có lúc chọn nhầm TP không phải vùng gần nhất.
+    // Sửa tận gốc: thuật toán tất định chọn Order Block/FVG + vùng thanh khoản, AI chỉ được giao
+    // NHIỆM VỤ DUY NHẤT là viết lại lý do bằng lời cho các con số đã chốt — không được đổi số.
+    if (!h1Trend) {
+      return {
+        noTrade: true,
+        reason: 'Chưa xác định được xu hướng H1 (thiếu dữ liệu cấu trúc lẫn EMA) — đứng ngoài chờ dữ liệu rõ ràng hơn.',
+      };
+    }
+    const bull = h1Trend === 'TĂNG';
+    const aRef = atr(h1) ?? spot * 0.005;
+    const dirMatch = (z: Zone) => (bull ? z.direction === 'bull' : z.direction === 'bear');
+    const zoneDist = (z: Zone) => Math.abs(spot - (bull ? z.top : z.bottom));
 
-    // Ưu tiên AI trả JSON theo phương pháp SMC; model yếu/hỏng thì dùng thuật toán
-    // "Order Block Retest" dự phòng — cũng dựa trên engine SMC, không phải EMA.
-    let plan: Plan | null = null;
-    const raw = await this.callLlm([
+    // Ưu tiên Order Block; không có thì xét FVG — cả hai đều lấy vùng GẦN GIÁ NHẤT theo đúng hướng
+    const obCandidates = unmitigatedOBs.filter(dirMatch).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
+    const fvgCandidates = unmitigatedFVGs.filter(dirMatch).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
+    const picked = obCandidates[0] ? { zone: obCandidates[0], kind: 'Order Block' } : fvgCandidates[0] ? { zone: fvgCandidates[0], kind: 'FVG' } : null;
+
+    if (!picked) {
+      return {
+        noTrade: true,
+        reason: `Xu hướng H1 là ${h1Trend} nhưng chưa có Order Block/FVG M15 nào (chưa bị lấp) đủ gần giá theo đúng hướng — chưa đủ điều kiện SMC để vào lệnh, đứng ngoài chờ giá tạo vùng mới.`,
+      };
+    }
+    const { zone, kind } = picked;
+    const entry = bull ? zone.top : zone.bottom; // chờ giá retest về rìa vùng gần nhất
+    const buffer = aRef * 0.15;
+    const sl = bull ? zone.bottom - buffer : zone.top + buffer; // SL ngoài vùng
+    const slDist = Math.abs(entry - sl);
+
+    // Quy trình chọn TP CỐ ĐỊNH: trong các vùng thanh khoản đúng hướng, lấy vùng GẦN NHẤT đạt RR
+    // tối thiểu 1:1 (không phải vùng gần nhất tuyệt đối, vì có thể quá gần để đáng vào lệnh); nếu
+    // không vùng nào đạt, dùng RR 1:2 mặc định. Giới hạn RR tối đa 1:5 để tránh mục tiêu viển vông.
+    const minRR = 1;
+    const maxRR = 5;
+    const liqInDirection = liquidity
+      .filter((e) => (bull ? e.price > entry : e.price < entry))
+      .map((e) => ({ ...e, dist: Math.abs(e.price - entry) }))
+      .sort((a, b) => a.dist - b.dist);
+    const qualifying = liqInDirection.find((e) => e.dist / slDist >= minRR);
+
+    let tp: number;
+    let tpNote: string;
+    if (qualifying && qualifying.dist / slDist <= maxRR) {
+      tp = qualifying.price;
+      tpNote = `vùng thanh khoản ${qualifying.kind} ${qualifying.price.toFixed(2)} — điểm hút thanh khoản gần nhất theo hướng ${bull ? 'tăng' : 'giảm'}, đạt RR tối thiểu 1:${minRR}`;
+    } else {
+      tp = bull ? entry + slDist * 2 : entry - slDist * 2;
+      tpNote = liqInDirection.length
+        ? `RR 1:2 mặc định (vùng thanh khoản gần nhất ${liqInDirection[0].price.toFixed(2)} không đạt RR hợp lý trong khoảng 1:${minRR}-1:${maxRR})`
+        : 'RR 1:2 mặc định (chưa phát hiện vùng thanh khoản phù hợp theo hướng này)';
+    }
+    const rr = +(Math.abs(tp - entry) / slDist).toFixed(2);
+    const direction: 'BUY' | 'SELL' = bull ? 'BUY' : 'SELL';
+
+    // Lời giải thích mẫu — LUÔN khớp 100% với số liệu vì dùng chính các biến đã tính ở trên
+    const templateReason =
+      `Cấu trúc H1 ${lastH1Event ? `vừa ${lastH1Event.type} xác nhận xu hướng ${h1Trend.toLowerCase()}` : `theo EMA đang ${h1Trend.toLowerCase()}`}. ` +
+      `Xuất hiện ${bull ? 'Bullish' : 'Bearish'} ${kind} tại vùng ${zone.bottom.toFixed(2)}-${zone.top.toFixed(2)}, gần giá hiện tại. Chờ giá hồi vào vùng này để vào ${direction} tại ${entry.toFixed(2)}. ` +
+      `Stop Loss đặt ${bull ? 'dưới' : 'trên'} vùng ${kind} tại ${sl.toFixed(2)} nhằm tránh nhiễu. ` +
+      `Take Profit đặt tại ${tpNote}, đạt tỷ lệ Risk:Reward 1:${rr}.`;
+
+    // AI chỉ được giao viết lại lời giải cho số liệu ĐÃ CHỐT — không được tạo hay đổi số mới
+    const aiReason = await this.callLlm([
       {
         role: 'system',
         content:
-          'Bạn là chuyên gia Smart Money Concept (SMC/ICT). Ưu tiên vào lệnh tại Order Block hoặc Fair Value Gap CHƯA bị lấp, ' +
-          'theo đúng hướng cấu trúc thị trường (BOS/CHOCH) trên H1, đặt SL ngoài vùng đó, và nhắm chốt lời tại vùng thanh khoản ' +
-          '(EQH/EQL) hoặc Order Block đối diện gần nhất. Trả lời DUY NHẤT một khối JSON hợp lệ, không markdown, không văn bản nào khác.',
+          'Bạn là chuyên gia Smart Money Concept (SMC/ICT) viết tiếng Việt. Nhiệm vụ DUY NHẤT: diễn giải lại một quyết định giao dịch ĐÃ CÓ SẴN ' +
+          'thành 2-3 câu văn mạch lạc. TUYỆT ĐỐI không đề xuất số liệu khác, không liệt kê nhiều phương án, không đổi entry/SL/TP đã cho.',
       },
       {
         role: 'user',
-        content: `${market.text}\n\n${smcText}\n\nGiá ${symbol} HIỆN TẠI: ${spot}. XU HƯỚNG CẤU TRÚC H1: ${h1Trend ?? 'không rõ'}.\nĐề xuất 1 setup NGẮN HẠN khung M15 theo phương pháp SMC — ưu tiên entry tại rìa Order Block/FVG chưa bị lấp, SL ngoài vùng đó, TP tại vùng thanh khoản gần nhất.\nQUY TẮC QUAN TRỌNG:\n1. Ưu tiên giao dịch THEO xu hướng cấu trúc H1 (${h1Trend ?? '?'}). Chỉ đi ngược khi có BOS/CHOCH đảo chiều RẤT rõ (nêu cụ thể trong reasoning).\n2. Nếu KHÔNG có Order Block/FVG nào đủ gần giá theo đúng hướng, hoặc thị trường nhiễu → ĐỪNG ép lệnh, trả về {"direction":"NONE","reasoning":"lý do đứng ngoài"}. Đứng ngoài cũng là một quyết định tốt.\n3. TUYỆT ĐỐI KHÔNG SELL ngay tại vùng hỗ trợ, KHÔNG BUY ngay tại vùng kháng cự — TRỪ KHI đó chính là một Order Block/FVG hợp lệ theo đúng hướng lệnh (retest hợp lệ theo SMC).\nTrả về JSON: {"direction":"BUY"|"SELL"|"NONE","entry":số,"sl":số,"tp":số,"reasoning":"tiếng Việt, nêu rõ căn cứ Order Block/FVG/thanh khoản/cấu trúc"}\nRàng buộc khi có lệnh: entry trong ±2% giá hiện tại; BUY thì sl<entry<tp, SELL thì tp<entry<sl; RR từ 1 đến 5.`,
+        content:
+          `${smcText}\n\n` +
+          `Setup đã được thuật toán SMC chốt từ dữ liệu trên — các con số dưới đây là CUỐI CÙNG, không được đổi:\n` +
+          `- Hướng: ${direction}\n- Entry: ${entry.toFixed(2)} (rìa ${bull ? 'Bullish' : 'Bearish'} ${kind} [${zone.bottom.toFixed(2)}-${zone.top.toFixed(2)}])\n` +
+          `- Stop Loss: ${sl.toFixed(2)}\n- Take Profit: ${tp.toFixed(2)} (${tpNote})\n- RR: 1:${rr}\n` +
+          `- Xu hướng H1: ${h1Trend}${lastH1Event ? ` (vừa ${lastH1Event.type})` : ' (theo EMA, H1 chưa có phá cấu trúc)'}\n\n` +
+          `Viết 2-3 câu tiếng Việt giải thích NGẮN GỌN vì sao chọn đúng các con số này. Không liệt kê phương án khác, không đổi số.`,
       },
     ], 0.2);
-    if (raw) {
-      const m = raw.match(/\{[\s\S]*\}/);
-      if (m) {
-        try {
-          const j = JSON.parse(m[0]);
-          if (j.direction === 'NONE') {
-            return { noTrade: true, reason: String(j.reasoning ?? 'AI đánh giá chưa có setup xác suất cao — nên đứng ngoài.') };
-          }
-          const cand = { direction: j.direction, entry: +j.entry, sl: +j.sl, tp: +j.tp, reasoning: String(j.reasoning ?? ''), source: 'AI' };
-          if (validate(cand)) plan = cand;
-        } catch {}
-      }
-    }
-    // Chặn lỗi logic kinh điển: SELL ngay tại hỗ trợ / BUY ngay tại kháng cự — TRỪ KHI đó là
-    // một Order Block/FVG hợp lệ theo đúng hướng (retest chuẩn SMC thường trùng vùng S/R cũ).
-    if (plan) {
-      const aRef = atr(h1) ?? spot * 0.003;
-      const nearLv = (levels: number[]) => levels.some((L) => Math.abs(plan!.entry - L) <= 0.6 * aRef);
-      const inValidZone = [...unmitigatedOBs, ...unmitigatedFVGs].some(
-        (z) =>
-          plan!.entry >= z.bottom - aRef * 0.3 && plan!.entry <= z.top + aRef * 0.3 &&
-          ((plan!.direction === 'BUY' && z.direction === 'bull') || (plan!.direction === 'SELL' && z.direction === 'bear')),
-      );
-      if (
-        !inValidZone &&
-        ((plan.direction === 'SELL' && nearLv(supportsSpot) && !nearLv(resistancesSpot)) ||
-          (plan.direction === 'BUY' && nearLv(resistancesSpot) && !nearLv(supportsSpot)))
-      ) {
-        plan = null; // kế hoạch AI phạm nguyên tắc S/R → dùng thuật toán Order Block Retest dự phòng
-      }
-    }
-    if (!plan) {
-      if (!h1Trend) {
-        return {
-          noTrade: true,
-          reason: 'Chưa xác định được xu hướng H1 (thiếu dữ liệu cấu trúc lẫn EMA) — đứng ngoài chờ dữ liệu rõ ràng hơn.',
-        };
-      }
-      const bull = h1Trend === 'TĂNG';
-      const aRef = atr(h1) ?? spot * 0.005;
-      // Tìm Order Block M15 chưa bị lấp, đúng hướng H1, gần giá nhất (trong 3×ATR)
-      const candidates = unmitigatedOBs
-        .filter((z) => (bull ? z.direction === 'bull' : z.direction === 'bear'))
-        .filter((z) => Math.abs(spot - (bull ? z.top : z.bottom)) <= aRef * 3)
-        .sort((a, b) => Math.abs(spot - (bull ? a.top : a.bottom)) - Math.abs(spot - (bull ? b.top : b.bottom)));
-      const ob = candidates[0];
-      if (!ob) {
-        return {
-          noTrade: true,
-          reason: `Xu hướng H1 là ${h1Trend} nhưng chưa có Order Block M15 nào (chưa bị lấp) đủ gần giá theo đúng hướng — chưa đủ điều kiện SMC để vào lệnh, đứng ngoài chờ giá tạo vùng mới.`,
-        };
-      }
-      const entry = bull ? ob.top : ob.bottom; // chờ giá retest về rìa Order Block gần nhất
-      const buffer = aRef * 0.15;
-      const sl = bull ? ob.bottom - buffer : ob.top + buffer; // SL đặt ngoài Order Block
-      const slDist = Math.abs(entry - sl);
-      const liqTp = liquidity
-        .filter((e) => (bull ? e.price > entry : e.price < entry))
-        .sort((a, b) => Math.abs(a.price - entry) - Math.abs(b.price - entry))[0]?.price;
-      const tp = liqTp != null && Math.abs(liqTp - entry) / slDist >= 1 ? liqTp : (bull ? entry + slDist * 2 : entry - slDist * 2);
-      plan = {
-        direction: bull ? 'BUY' : 'SELL', entry, sl, tp,
-        reasoning:
-          `(Thuật toán SMC — Order Block Retest, AI không trả kế hoạch hợp lệ) H1 ${lastH1Event ? `vừa ${lastH1Event.type} hướng ${h1Trend}` : `theo EMA đang ${h1Trend}`}. ` +
-          `Entry chờ giá retest rìa ${bull ? 'Bullish' : 'Bearish'} Order Block M15 [${ob.bottom.toFixed(2)}-${ob.top.toFixed(2)}] chưa bị lấp. SL đặt ngoài Order Block. ` +
-          `TP ${liqTp != null ? `nhắm vùng thanh khoản gần nhất ${liqTp.toFixed(2)}` : 'theo RR 1:2 (chưa có vùng thanh khoản rõ ràng)'}. ⚠️ Chỉ tham khảo, chưa qua kiểm chứng thống kê — nên chạy thử ở trang Backtest (chiến lược "SMC BOS") trước khi tin tưởng.`,
-        source: 'SMC',
-      };
-    }
-    const rr = +(Math.abs(plan.tp - plan.entry) / Math.abs(plan.entry - plan.sl)).toFixed(2);
+
+    const finalReasoning = (aiReason?.trim() || templateReason).slice(0, 1500);
     return this.prisma.aiSetup.create({
       data: {
-        userId, symbol,
-        direction: plan.direction,
-        entry: +plan.entry.toFixed(4), sl: +plan.sl.toFixed(4), tp: +plan.tp.toFixed(4),
-        rr, reasoning: `[Xu hướng H1: ${h1Trend ?? 'không rõ'} | nến lệch spot ${divergePct.toFixed(2)}%] ${plan.reasoning}`.slice(0, 2000), source: plan.source,
+        userId, symbol, direction,
+        entry: +entry.toFixed(4), sl: +sl.toFixed(4), tp: +tp.toFixed(4), rr,
+        reasoning: `[Xu hướng H1: ${h1Trend} | nến lệch spot ${divergePct.toFixed(2)}%] ${finalReasoning}`.slice(0, 2000),
+        source: aiReason ? 'SMC' : 'SMC-ALGO',
       },
     });
   }
