@@ -8,8 +8,8 @@ export class RunBacktestDto {
   @IsIn(['5m', '15m', '30m', '1h', '4h', '1d'])
   interval: '5m' | '15m' | '30m' | '1h' | '4h' | '1d';
 
-  @IsEnum(['ema_cross', 'rsi_reversion', 'smc_bos'])
-  strategy: 'ema_cross' | 'rsi_reversion' | 'smc_bos';
+  @IsEnum(['ema_cross', 'rsi_reversion', 'smc_bos', 'cyclical_extreme'])
+  strategy: 'ema_cross' | 'rsi_reversion' | 'smc_bos' | 'cyclical_extreme';
 
   @IsOptional() @Type(() => Number) @IsNumber() @Min(2) @Max(200)
   emaFast = 9;
@@ -40,4 +40,10 @@ export class RunBacktestDto {
 
   @IsOptional() @Type(() => Number) @IsNumber() @Min(10)
   initialBalance = 1000;
+
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(3) @Max(50)
+  fisherPeriod = 10;
+
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0.5) @Max(3)
+  fisherThreshold = 1.2;
 }

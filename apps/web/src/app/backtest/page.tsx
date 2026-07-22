@@ -24,6 +24,12 @@ const defaults = {
   symbol: 'XAUUSD', interval: '1h', strategy: 'ema_cross',
   emaFast: 9, emaSlow: 21, rsiPeriod: 14, rsiLower: 30, rsiUpper: 70,
   atrPeriod: 14, slAtrMult: 1.5, rr: 2, riskPercent: 1, initialBalance: 1000,
+  fisherPeriod: 10, fisherThreshold: 1.2,
+};
+
+const strategyLabels: Record<string, string> = {
+  ema_cross: 'EMA Cross', rsi_reversion: 'RSI đảo chiều', smc_bos: 'SMC BOS',
+  cyclical_extreme: 'Cyclical Extreme (Fisher)',
 };
 
 export default function BacktestPage() {
@@ -43,7 +49,7 @@ export default function BacktestPage() {
 
   async function share() {
     if (!result) return;
-    const title = `${form.strategy === 'ema_cross' ? 'EMA Cross' : form.strategy === 'rsi_reversion' ? 'RSI đảo chiều' : 'SMC BOS'} ${form.symbol} ${form.interval}`;
+    const title = `${strategyLabels[form.strategy] ?? form.strategy} ${form.symbol} ${form.interval}`;
     await api('/shared', {
       method: 'POST',
       body: JSON.stringify({
@@ -158,6 +164,7 @@ export default function BacktestPage() {
             <option value="ema_cross">EMA Cross</option>
             <option value="rsi_reversion">RSI đảo chiều</option>
             <option value="smc_bos">SMC BOS</option>
+            <option value="cyclical_extreme">Cyclical Extreme (Fisher)</option>
           </select>
         </label>
         {form.strategy === 'ema_cross' && (<>
@@ -168,6 +175,10 @@ export default function BacktestPage() {
           <label>RSI kỳ<input className="input mt-1" type="number" value={form.rsiPeriod} onChange={(e) => set('rsiPeriod', +e.target.value)} /></label>
           <label>Quá bán<input className="input mt-1" type="number" value={form.rsiLower} onChange={(e) => set('rsiLower', +e.target.value)} /></label>
           <label>Quá mua<input className="input mt-1" type="number" value={form.rsiUpper} onChange={(e) => set('rsiUpper', +e.target.value)} /></label>
+        </>)}
+        {form.strategy === 'cyclical_extreme' && (<>
+          <label>Fisher kỳ<input className="input mt-1" type="number" value={form.fisherPeriod} onChange={(e) => set('fisherPeriod', +e.target.value)} /></label>
+          <label>Ngưỡng cực trị<input className="input mt-1" type="number" step="0.1" value={form.fisherThreshold} onChange={(e) => set('fisherThreshold', +e.target.value)} /></label>
         </>)}
         <label>SL (×ATR)<input className="input mt-1" type="number" step="0.5" value={form.slAtrMult} onChange={(e) => set('slAtrMult', +e.target.value)} /></label>
         <label>RR (TP)<input className="input mt-1" type="number" step="0.5" value={form.rr} onChange={(e) => set('rr', +e.target.value)} /></label>

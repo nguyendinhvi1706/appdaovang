@@ -1,6 +1,10 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { MarketService } from '../market/market.service';
 import { dealingRange, detectEqualLevels, detectFVG, detectOrderBlocks, detectStructure, detectSwings } from './smc.engine';
+import { detectCyclicalExtremes, fisherTransform } from '../ai/indicators';
+
+const FISHER_PERIOD = 10;
+const FISHER_THRESHOLD = 1.2;
 
 @Injectable()
 export class SmcService {
@@ -32,6 +36,7 @@ export class SmcService {
     }
     const swings = detectSwings(candles);
     const events = detectStructure(candles, swings);
+    const fisher = fisherTransform(candles, FISHER_PERIOD);
     return {
       symbol: symbol.toUpperCase(),
       interval,
@@ -41,6 +46,9 @@ export class SmcService {
       fvgs: detectFVG(candles),
       eqLevels: detectEqualLevels(candles, swings),
       dealingRange: dealingRange(candles, swings),
+      fisher,
+      cyclicalExtremes: detectCyclicalExtremes(fisher, FISHER_THRESHOLD).slice(-20),
+      fisherThreshold: FISHER_THRESHOLD,
       spot: spot?.price ?? null,
       offset,
     };

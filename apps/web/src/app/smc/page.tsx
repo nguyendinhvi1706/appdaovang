@@ -7,6 +7,8 @@ import { api } from '@/lib/api';
 type Candle = { time: number; open: number; high: number; low: number; close: number };
 type Zone = { kind: 'OB' | 'FVG'; direction: 'bull' | 'bear'; top: number; bottom: number; fromTime: number; toTime: number | null; mitigated: boolean };
 type EqLevel = { kind: 'EQH' | 'EQL'; price: number; times: number[] };
+type FisherPoint = { time: number; fisher: number; signal: number };
+type CyclicalExtreme = { time: number; type: 'high' | 'low'; fisher: number };
 type SmcData = {
   candles: Candle[];
   events: { type: 'BOS' | 'CHOCH'; direction: 'bull' | 'bear'; time: number; price: number }[];
@@ -14,6 +16,9 @@ type SmcData = {
   fvgs: Zone[];
   eqLevels: EqLevel[];
   dealingRange: { high: number; low: number; eq: number; fromTime: number } | null;
+  fisher: FisherPoint[];
+  cyclicalExtremes: CyclicalExtreme[];
+  fisherThreshold: number;
   spot?: number | null;
   offset?: number;
 };
@@ -36,6 +41,7 @@ const killZones = [
 const toggleDefs = [
   ['ob', 'Order Block'], ['fvg', 'FVG'], ['eq', 'EQH/EQL'], ['struct', 'BOS/CHOCH'],
   ['pd', 'Premium/Discount'], ['session', 'Session'], ['kz', 'Kill Zone'],
+  ['fisher', 'Cyclical Extreme (Fisher)'],
 ] as const;
 
 export default function SmcPage() {
@@ -49,7 +55,7 @@ export default function SmcPage() {
   const [symbol, setSymbol] = useState('XAUUSD');
   const [interval, setIntervalV] = useState<(typeof intervals)[number]>('1h');
   const [toggles, setToggles] = useState<Record<string, boolean>>({
-    ob: true, fvg: true, eq: true, struct: true, pd: false, session: false, kz: false,
+    ob: true, fvg: true, eq: true, struct: true, pd: false, session: false, kz: false, fisher: false,
   });
   const togglesRef = useRef(toggles);
   togglesRef.current = toggles;
@@ -148,6 +154,55 @@ export default function SmcPage() {
         ctx.fillStyle = lv.kind === 'EQH' ? '#ef4444' : '#22c55e';
         ctx.fillText(`${lv.kind} $$$`, w - 64, py - 3);
       }
+    }
+
+    // Cyclical Extreme (Fisher Transform) — dải oscillator riêng ở đáy chart, dùng chung trục x
+    if (tg.fisher && data.fisher.length) {
+      const stripH = h * 0.22;
+      const stripTop = h - stripH - 6;
+      const stripBottom = h - 6;
+      const midY = (stripTop + stripBottom) / 2;
+      const threshold = data.fisherThreshold || 1.2;
+      const maxAbs = Math.max(threshold + 0.3, ...data.fisher.map((f) => Math.abs(f.fisher)));
+      const scaleY = (stripH / 2) / maxAbs;
+      const yF = (v: number) => midY - v * scaleY;
+
+      ctx.fillStyle = 'rgba(13,17,23,0.88)';
+      ctx.fillRect(0, stripTop, w, stripH);
+      ctx.strokeStyle = 'rgba(48,54,61,0.9)';
+      ctx.beginPath(); ctx.moveTo(0, stripTop); ctx.lineTo(w, stripTop); ctx.stroke();
+
+      ctx.setLineDash([2, 2]);
+      ctx.strokeStyle = 'rgba(156,163,175,0.4)';
+      ctx.beginPath(); ctx.moveTo(0, yF(0)); ctx.lineTo(w, yF(0)); ctx.stroke();
+      ctx.strokeStyle = 'rgba(239,68,68,0.4)';
+      ctx.beginPath(); ctx.moveTo(0, yF(threshold)); ctx.lineTo(w, yF(threshold)); ctx.stroke();
+      ctx.strokeStyle = 'rgba(34,197,94,0.4)';
+      ctx.beginPath(); ctx.moveTo(0, yF(-threshold)); ctx.lineTo(w, yF(-threshold)); ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.strokeStyle = '#d4a017';
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      let started = false;
+      for (const f of data.fisher) {
+        const cx = x(f.time);
+        if (cx == null) continue;
+        const cy = yF(f.fisher);
+        if (!started) { ctx.moveTo(cx, cy); started = true; } else ctx.lineTo(cx, cy);
+      }
+      ctx.stroke();
+      ctx.lineWidth = 1;
+
+      for (const e of data.cyclicalExtremes) {
+        const cx = x(e.time);
+        if (cx == null) continue;
+        ctx.fillStyle = e.type === 'low' ? '#22c55e' : '#ef4444';
+        ctx.beginPath(); ctx.arc(cx, yF(e.fisher), 3, 0, Math.PI * 2); ctx.fill();
+      }
+
+      ctx.fillStyle = '#9ca3af';
+      ctx.fillText(`Cyclical Extreme (Fisher Transform, ngưỡng ±${threshold})`, 6, stripTop + 12);
     }
   }, [interval]);
 
@@ -260,6 +315,7 @@ export default function SmcPage() {
       </div>
       <p className="text-xs text-gray-500 mt-2">
         OB xanh/đỏ = Order Block bull/bear · FVG xanh dương/cam = Fair Value Gap · Nét đứt EQH/EQL = vùng thanh khoản · Vùng mờ = đã mitigated. Session/Kill Zone chỉ hiện ở khung ≤ 1h.
+        Cyclical Extreme (Fisher Transform) là dải oscillator ở đáy chart — chấm xanh/đỏ đánh dấu điểm Fisher cắt tín hiệu ngay từ vùng cực trị (công thức Ehlers công khai, không phải hộp đen).
       </p>
     </AppShell>
   );

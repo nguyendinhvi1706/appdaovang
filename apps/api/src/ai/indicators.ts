@@ -35,6 +35,56 @@ export function atr(candles: Candle[], period = 14): number | null {
   return +(trs.slice(-period).reduce((a, b) => a + b, 0) / period).toFixed(4);
 }
 
+export type FisherPoint = { time: number; fisher: number; signal: number };
+export type CyclicalExtreme = { time: number; type: 'high' | 'low'; fisher: number };
+
+/**
+ * Fisher Transform (John Ehlers, "Cybernetic Analysis for Stocks and Futures") — công thức công
+ * khai, không phải hộp đen. Chuẩn hóa vị trí giá trong N nến gần nhất về đường cong Gauss, làm
+ * NHỌN các điểm đảo chiều theo chu kỳ — rõ ràng và dứt khoát hơn RSI/Stochastic (vốn dễ "phẳng lì"
+ * khi giá đi ngang lâu ở vùng quá mua/quá bán). Đây là lấy cảm hứng từ ý tưởng "điểm cực trị theo
+ * chu kỳ" kiểu KCX của CRAZII, nhưng công thức hoàn toàn minh bạch, tự kiểm chứng được.
+ */
+export function fisherTransform(c: Candle[], period = 10): FisherPoint[] {
+  const out: FisherPoint[] = [];
+  let value = 0;
+  let fisher = 0;
+  for (let i = 0; i < c.length; i++) {
+    if (i < period - 1) {
+      out.push({ time: c[i].time, fisher: 0, signal: 0 });
+      continue;
+    }
+    const window = c.slice(i - period + 1, i + 1);
+    const hi = Math.max(...window.map((x) => x.high));
+    const lo = Math.min(...window.map((x) => x.low));
+    const mid = (c[i].high + c[i].low) / 2;
+    const raw = hi === lo ? 0 : 2 * ((mid - lo) / (hi - lo) - 0.5);
+    value = 0.33 * raw + 0.67 * value;
+    value = Math.max(-0.999, Math.min(0.999, value));
+    const prevFisher = fisher;
+    fisher = 0.5 * Math.log((1 + value) / (1 - value)) + 0.5 * prevFisher;
+    // Đường tín hiệu = Fisher của chính nó, trễ 1 nến (cách dùng chuẩn của Ehlers)
+    out.push({ time: c[i].time, fisher: +fisher.toFixed(4), signal: +prevFisher.toFixed(4) });
+  }
+  return out;
+}
+
+/** Điểm cực trị theo chu kỳ: Fisher cắt qua đường tín hiệu NGAY TỪ vùng cực trị (|Fisher| vượt ngưỡng trước khi cắt) */
+export function detectCyclicalExtremes(points: FisherPoint[], threshold = 1.2): CyclicalExtreme[] {
+  const out: CyclicalExtreme[] = [];
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1];
+    const cur = points[i];
+    if (prev.fisher <= prev.signal && cur.fisher > cur.signal && prev.fisher < -threshold) {
+      out.push({ time: cur.time, type: 'low', fisher: cur.fisher }); // cực trị đáy → khả năng đảo chiều tăng
+    }
+    if (prev.fisher >= prev.signal && cur.fisher < cur.signal && prev.fisher > threshold) {
+      out.push({ time: cur.time, type: 'high', fisher: cur.fisher }); // cực trị đỉnh → khả năng đảo chiều giảm
+    }
+  }
+  return out;
+}
+
 /** Swing high/low gần nhất làm hỗ trợ/kháng cự thô */
 export function swingLevels(candles: Candle[], lookback = 3) {
   const highs: number[] = [], lows: number[] = [];

@@ -1,7 +1,8 @@
 import { Candle } from '../market/market.service';
 import { detectStructure, detectSwings } from '../smc/smc.engine';
+import { detectCyclicalExtremes, fisherTransform } from '../ai/indicators';
 
-export type StrategyId = 'ema_cross' | 'rsi_reversion' | 'smc_bos';
+export type StrategyId = 'ema_cross' | 'rsi_reversion' | 'smc_bos' | 'cyclical_extreme';
 
 export type BacktestConfig = {
   strategy: StrategyId;
@@ -15,6 +16,8 @@ export type BacktestConfig = {
   rr: number;          // TP = RR × khoảng SL
   riskPercent: number; // % vốn rủi ro mỗi lệnh
   initialBalance: number;
+  fisherPeriod: number;    // Cyclical Extreme (Fisher Transform)
+  fisherThreshold: number;
 };
 
 export type Trade = {
@@ -117,6 +120,15 @@ function buildSignals(c: Candle[], cfg: BacktestConfig): ('buy' | 'sell' | null)
       if (ev.type !== 'BOS') continue;
       const i = byTime.get(ev.time);
       if (i != null) signals[i] = ev.direction === 'bull' ? 'buy' : 'sell';
+    }
+  } else if (cfg.strategy === 'cyclical_extreme') {
+    const points = fisherTransform(c, cfg.fisherPeriod);
+    const extremes = detectCyclicalExtremes(points, cfg.fisherThreshold);
+    const byTime = new Map(c.map((x, i) => [x.time, i]));
+    for (const e of extremes) {
+      const i = byTime.get(e.time);
+      // Cực trị đáy (type 'low') → kỳ vọng đảo chiều tăng → BUY; đỉnh → SELL
+      if (i != null) signals[i] = e.type === 'low' ? 'buy' : 'sell';
     }
   }
   return signals;
