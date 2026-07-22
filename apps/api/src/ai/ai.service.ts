@@ -294,6 +294,7 @@ export class AiService {
 
     // Bù basis nếu nến là futures (GC=F) — quy toàn bộ mức giá SMC bên dưới về hệ giá spot
     const offM = spot - lastClose;
+    const aRef = atr(h1) ?? spot * 0.005;
 
     // ============ Phương pháp SMC (Smart Money Concept): cấu trúc, Order Block, FVG, thanh khoản ============
     // Đây là engine đã xây cho Giai đoạn 3 (trang SMC) — giờ tái dùng cho Setup lệnh thay vì chỉ
@@ -301,11 +302,15 @@ export class AiService {
     // "50-50" trong thị trường sideway; SMC bám theo hành động giá thật (nơi giá đảo chiều, nơi
     // thanh khoản bị quét) nên cho điểm vào/ra cụ thể hơn — dù không có phương pháp nào đảm bảo
     // thắng chắc, đây là khung phân tích có căn cứ rõ ràng hơn một đường trung bình đơn thuần.
+    // Lọc bỏ vùng quá nhỏ (< 10% ATR) — đây thường chỉ là nhiễu giá chứ không phải dấu vết tổ
+    // chức thật, nếu không lọc sẽ chọn nhầm vùng gần như trùng giá hiện tại, mất ý nghĩa "chờ retest".
+    const minZoneSize = aRef * 0.1;
     const m15Swings = detectSwings(h1);
     const m15Structure = detectStructure(h1, m15Swings);
     const shiftZone = (z: Zone) => ({ ...z, top: z.top + offM, bottom: z.bottom + offM });
-    const unmitigatedOBs = detectOrderBlocks(h1, m15Structure).filter((z) => !z.mitigated).map(shiftZone);
-    const unmitigatedFVGs = detectFVG(h1).filter((z) => !z.mitigated).map(shiftZone);
+    const sizeable = (z: Zone) => z.top - z.bottom >= minZoneSize;
+    const unmitigatedOBs = detectOrderBlocks(h1, m15Structure).filter((z) => !z.mitigated).map(shiftZone).filter(sizeable);
+    const unmitigatedFVGs = detectFVG(h1).filter((z) => !z.mitigated).map(shiftZone).filter(sizeable);
     const liquidity = detectEqualLevels(h1, m15Swings).map((e) => ({ ...e, price: e.price + offM }));
 
     // Xu hướng H1: ưu tiên BOS/CHOCH gần nhất (phản ứng ngay khi cấu trúc bị phá — không trễ
@@ -317,17 +322,22 @@ export class AiService {
       ? (lastH1Event.direction === 'bull' ? 'TĂNG' : 'GIẢM')
       : (h1e20 != null && h1e50 != null ? (h1e20 >= h1e50 ? 'TĂNG' : 'GIẢM') : null);
 
+    // Ghi rõ sự kiện BOS/CHOCH xảy ra CÁCH ĐÂY BAO LÂU — tránh dùng chữ "vừa" cho một sự kiện
+    // thực ra đã xảy ra nhiều giờ/ngày trước (chỉ là sự kiện gần nhất tìm được trong dữ liệu).
+    const eventAgeH = lastH1Event ? (Date.now() / 1000 - lastH1Event.time) / 3600 : null;
+    const eventAgeText = eventAgeH == null ? '' : eventAgeH < 1.5 ? 'vừa mới' : `cách đây khoảng ${Math.round(eventAgeH)} giờ`;
+
     const smcText = [
       'CẤU TRÚC SMC (khung M15, mức giá đã quy về spot):',
       lastH1Event
-        ? `H1 vừa ${lastH1Event.type} theo hướng ${lastH1Event.direction === 'bull' ? 'TĂNG' : 'GIẢM'} tại mốc ${(lastH1Event.price + offM).toFixed(2)}.`
+        ? `H1 ${eventAgeText} có tín hiệu ${lastH1Event.type} theo hướng ${lastH1Event.direction === 'bull' ? 'TĂNG' : 'GIẢM'} tại mốc ${(lastH1Event.price + offM).toFixed(2)} (đây là sự kiện phá cấu trúc gần nhất tìm được, không nhất thiết vừa xảy ra).`
         : 'H1 chưa có phá cấu trúc (BOS/CHOCH) rõ ràng gần đây — dùng EMA làm căn cứ xu hướng tạm thời.',
       unmitigatedOBs.length
-        ? `Order Block M15 chưa bị lấp: ${unmitigatedOBs.slice(-5).map((z) => `${z.direction === 'bull' ? 'Bullish' : 'Bearish'} [${z.bottom.toFixed(2)}-${z.top.toFixed(2)}]`).join(', ')}`
-        : 'Không có Order Block M15 nào còn hiệu lực.',
+        ? `Order Block M15 chưa bị lấp (đã lọc bỏ vùng quá nhỏ/nhiễu): ${unmitigatedOBs.slice(-5).map((z) => `${z.direction === 'bull' ? 'Bullish' : 'Bearish'} [${z.bottom.toFixed(2)}-${z.top.toFixed(2)}]`).join(', ')}`
+        : 'Không có Order Block M15 nào còn hiệu lực và đủ lớn để đáng tin cậy.',
       unmitigatedFVGs.length
-        ? `FVG M15 chưa bị lấp: ${unmitigatedFVGs.slice(-5).map((z) => `${z.direction === 'bull' ? 'Bullish' : 'Bearish'} [${z.bottom.toFixed(2)}-${z.top.toFixed(2)}]`).join(', ')}`
-        : 'Không có FVG M15 nào còn hiệu lực.',
+        ? `FVG M15 chưa bị lấp (đã lọc bỏ vùng quá nhỏ/nhiễu): ${unmitigatedFVGs.slice(-5).map((z) => `${z.direction === 'bull' ? 'Bullish' : 'Bearish'} [${z.bottom.toFixed(2)}-${z.top.toFixed(2)}]`).join(', ')}`
+        : 'Không có FVG M15 nào còn hiệu lực và đủ lớn để đáng tin cậy.',
       liquidity.length
         ? `Vùng thanh khoản (EQH/EQL) chưa bị quét: ${liquidity.map((e) => `${e.kind} ${e.price.toFixed(2)}`).join(', ')}`
         : 'Chưa phát hiện vùng thanh khoản EQH/EQL rõ ràng.',
@@ -346,7 +356,6 @@ export class AiService {
       };
     }
     const bull = h1Trend === 'TĂNG';
-    const aRef = atr(h1) ?? spot * 0.005;
     const dirMatch = (z: Zone) => (bull ? z.direction === 'bull' : z.direction === 'bear');
     const zoneDist = (z: Zone) => Math.abs(spot - (bull ? z.top : z.bottom));
 
@@ -394,7 +403,7 @@ export class AiService {
 
     // Lời giải thích mẫu — LUÔN khớp 100% với số liệu vì dùng chính các biến đã tính ở trên
     const templateReason =
-      `Cấu trúc H1 ${lastH1Event ? `vừa ${lastH1Event.type} xác nhận xu hướng ${h1Trend.toLowerCase()}` : `theo EMA đang ${h1Trend.toLowerCase()}`}. ` +
+      `Cấu trúc H1 ${lastH1Event ? `${eventAgeText} có ${lastH1Event.type} xác nhận xu hướng ${h1Trend.toLowerCase()}` : `theo EMA đang ${h1Trend.toLowerCase()}`}. ` +
       `Xuất hiện ${bull ? 'Bullish' : 'Bearish'} ${kind} tại vùng ${zone.bottom.toFixed(2)}-${zone.top.toFixed(2)}, gần giá hiện tại. Chờ giá hồi vào vùng này để vào ${direction} tại ${entry.toFixed(2)}. ` +
       `Stop Loss đặt ${bull ? 'dưới' : 'trên'} vùng ${kind} tại ${sl.toFixed(2)} nhằm tránh nhiễu. ` +
       `Take Profit đặt tại ${tpNote}, đạt tỷ lệ Risk:Reward 1:${rr}.`;
@@ -414,7 +423,7 @@ export class AiService {
           `Setup đã được thuật toán SMC chốt từ dữ liệu trên — các con số dưới đây là CUỐI CÙNG, không được đổi:\n` +
           `- Hướng: ${direction}\n- Entry: ${entry.toFixed(2)} (rìa ${bull ? 'Bullish' : 'Bearish'} ${kind} [${zone.bottom.toFixed(2)}-${zone.top.toFixed(2)}])\n` +
           `- Stop Loss: ${sl.toFixed(2)}\n- Take Profit: ${tp.toFixed(2)} (${tpNote})\n- RR: 1:${rr}\n` +
-          `- Xu hướng H1: ${h1Trend}${lastH1Event ? ` (vừa ${lastH1Event.type})` : ' (theo EMA, H1 chưa có phá cấu trúc)'}\n\n` +
+          `- Xu hướng H1: ${h1Trend}${lastH1Event ? ` (${eventAgeText} có ${lastH1Event.type} — dùng đúng cụm từ về thời gian này, KHÔNG tự đổi thành "vừa" nếu không phải vừa xảy ra)` : ' (theo EMA, H1 chưa có phá cấu trúc)'}\n\n` +
           `Viết 2-3 câu tiếng Việt giải thích NGẮN GỌN vì sao chọn đúng các con số này. Không liệt kê phương án khác, không đổi số.`,
       },
     ], 0.2);
