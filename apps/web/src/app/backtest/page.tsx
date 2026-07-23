@@ -25,11 +25,12 @@ const defaults = {
   emaFast: 9, emaSlow: 21, rsiPeriod: 14, rsiLower: 30, rsiUpper: 70,
   atrPeriod: 14, slAtrMult: 1.5, rr: 2, riskPercent: 1, initialBalance: 1000,
   fisherPeriod: 10, fisherThreshold: 1.2,
+  grid369Unit: 100, grid369Anchor: 0,
 };
 
 const strategyLabels: Record<string, string> = {
   ema_cross: 'EMA Cross', rsi_reversion: 'RSI đảo chiều', smc_bos: 'SMC BOS',
-  cyclical_extreme: 'Cyclical Extreme (Fisher)',
+  cyclical_extreme: 'Cyclical Extreme (Fisher)', grid_369: 'Lưới 369 (kiểm chứng)',
 };
 
 export default function BacktestPage() {
@@ -165,6 +166,7 @@ export default function BacktestPage() {
             <option value="rsi_reversion">RSI đảo chiều</option>
             <option value="smc_bos">SMC BOS</option>
             <option value="cyclical_extreme">Cyclical Extreme (Fisher)</option>
+            <option value="grid_369">Lưới 369 (kiểm chứng)</option>
           </select>
         </label>
         {form.strategy === 'ema_cross' && (<>
@@ -179,6 +181,14 @@ export default function BacktestPage() {
         {form.strategy === 'cyclical_extreme' && (<>
           <label>Fisher kỳ<input className="input mt-1" type="number" value={form.fisherPeriod} onChange={(e) => set('fisherPeriod', +e.target.value)} /></label>
           <label>Ngưỡng cực trị<input className="input mt-1" type="number" step="0.1" value={form.fisherThreshold} onChange={(e) => set('fisherThreshold', +e.target.value)} /></label>
+        </>)}
+        {form.strategy === 'grid_369' && (<>
+          <label title="Chu kỳ lặp lưới, theo đúng tài liệu gốc là 100 cho XAUUSD. Với cặp giá trị nhỏ (VD EURUSD ~1.05) cần đổi đơn vị phù hợp, VD 1.">
+            Chu kỳ lưới<input className="input mt-1" type="number" step="1" value={form.grid369Unit} onChange={(e) => set('grid369Unit', +e.target.value)} />
+          </label>
+          <label title="Pha dịch lưới (mặc định 0 để khách quan, không chọn theo hindsight)">
+            Pha lưới (anchor)<input className="input mt-1" type="number" step="1" value={form.grid369Anchor} onChange={(e) => set('grid369Anchor', +e.target.value)} />
+          </label>
         </>)}
         <label>SL (×ATR)<input className="input mt-1" type="number" step="0.5" value={form.slAtrMult} onChange={(e) => set('slAtrMult', +e.target.value)} /></label>
         <label>RR (TP)<input className="input mt-1" type="number" step="0.5" value={form.rr} onChange={(e) => set('rr', +e.target.value)} /></label>

@@ -2,7 +2,7 @@ import { Candle } from '../market/market.service';
 import { detectStructure, detectSwings } from '../smc/smc.engine';
 import { detectCyclicalExtremes, fisherTransform } from '../ai/indicators';
 
-export type StrategyId = 'ema_cross' | 'rsi_reversion' | 'smc_bos' | 'cyclical_extreme';
+export type StrategyId = 'ema_cross' | 'rsi_reversion' | 'smc_bos' | 'cyclical_extreme' | 'grid_369';
 
 export type BacktestConfig = {
   strategy: StrategyId;
@@ -18,6 +18,8 @@ export type BacktestConfig = {
   initialBalance: number;
   fisherPeriod: number;    // Cyclical Extreme (Fisher Transform)
   fisherThreshold: number;
+  grid369Unit: number;     // Lưới 369: chu kỳ lặp lại (đơn vị giá, VD 100 cho XAUUSD theo đúng tài liệu gốc)
+  grid369Anchor: number;   // Lưới 369: pha dịch lưới
 };
 
 export type Trade = {
@@ -129,6 +131,37 @@ function buildSignals(c: Candle[], cfg: BacktestConfig): ('buy' | 'sell' | null)
       const i = byTime.get(e.time);
       // Cực trị đáy (type 'low') → kỳ vọng đảo chiều tăng → BUY; đỉnh → SELL
       if (i != null) signals[i] = e.type === 'low' ? 'buy' : 'sell';
+    }
+  } else if (cfg.strategy === 'grid_369') {
+    // Lưới "369" — dịch nguyên mẫu số học từ tài liệu gốc (chu kỳ lặp mỗi `grid369Unit` đơn vị giá,
+    // 18 mốc/chu kỳ theo đúng khoảng cách 3-4-3-10-10 đã dạy, tỷ lệ theo % của chu kỳ 100 gốc).
+    // Test HOÀN TOÀN khách quan: mỗi nến chỉ dùng close nến trước + high/low nến hiện tại (đã đóng),
+    // không dùng thông tin tương lai — không vẽ lại sau khi biết kết quả như trong video quảng cáo.
+    const unit = cfg.grid369Unit;
+    const anchor = cfg.grid369Anchor;
+    // 18 offset tương đối (tính theo % của chu kỳ 100 đơn vị) suy ra trực tiếp từ bảng "Điểm gốc /
+    // Điểm biên / Vùng giao thoa" trong tài liệu: mẫu khoảng cách lặp lại 3,4,3,10,10 × 4 lần = 100.
+    const relOffsets = [0, 3, 7, 10, 20, 30, 33, 37, 40, 50, 60, 63, 67, 70, 80, 90, 93, 97];
+    const scale = unit / 100;
+    const levelsNear = (price: number): number[] => {
+      const base = Math.floor((price - anchor) / unit) * unit + anchor;
+      const lv: number[] = [];
+      for (const off of relOffsets) {
+        lv.push(base - unit + off * scale, base + off * scale, base + unit + off * scale);
+      }
+      return lv;
+    };
+    for (let i = 1; i < c.length; i++) {
+      const prevClose = c[i - 1].close;
+      const { low, high } = c[i];
+      const touched = levelsNear(c[i].close).filter((L) => L >= low && L <= high);
+      if (!touched.length) continue;
+      touched.sort((a, b) => Math.abs(a - prevClose) - Math.abs(b - prevClose));
+      const L = touched[0];
+      // Giá đi lên chạm mốc từ dưới → mốc đóng vai kháng cự → kỳ vọng đảo chiều giảm (SELL).
+      // Giá đi xuống chạm mốc từ trên → mốc đóng vai hỗ trợ → kỳ vọng bật lại tăng (BUY).
+      if (prevClose < L) signals[i] = 'sell';
+      else if (prevClose > L) signals[i] = 'buy';
     }
   }
   return signals;
