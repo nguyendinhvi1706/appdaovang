@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, Patch, Post, Request, UseGuards } from '@nestjs/common';
-import { IsArray, IsString } from 'class-validator';
+import { IsArray, IsIn, IsOptional, IsString } from 'class-validator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AiService, ChatMessage } from './ai.service';
 
@@ -11,6 +11,9 @@ class ChatDto {
 class CreateSetupDto {
   @IsString()
   symbol: string;
+
+  @IsOptional() @IsIn(['AUTO', 'BUY', 'SELL'])
+  direction?: 'AUTO' | 'BUY' | 'SELL';
 }
 
 @UseGuards(JwtAuthGuard)
@@ -30,7 +33,7 @@ export class AiController {
 
   @Post('setup')
   createSetup(@Request() req: any, @Body() dto: CreateSetupDto) {
-    return this.svc.createSetup(req.user.id, dto.symbol);
+    return this.svc.createSetup(req.user.id, dto.symbol, dto.direction ?? 'AUTO');
   }
 
   @Get('setups')

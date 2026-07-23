@@ -103,6 +103,7 @@ function ChatTab() {
 function SetupsTab() {
   const [setups, setSetups] = useState<Setup[]>([]);
   const [symbol, setSymbol] = useState('XAUUSD');
+  const [direction, setDirection] = useState<'AUTO' | 'BUY' | 'SELL'>('AUTO');
   const [creating, setCreating] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -123,7 +124,7 @@ function SetupsTab() {
   async function create() {
     setCreating(true); setError(''); setNotice('');
     try {
-      const res = await api<any>('/ai/setup', { method: 'POST', body: JSON.stringify({ symbol }) });
+      const res = await api<any>('/ai/setup', { method: 'POST', body: JSON.stringify({ symbol, direction }) });
       if (res?.noTrade) {
         setNotice(res.reason);
       } else {
@@ -150,6 +151,12 @@ function SetupsTab() {
         <div className="flex items-center gap-3 flex-wrap">
           <select className="input w-auto" value={symbol} onChange={(e) => setSymbol(e.target.value)}>
             {['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'BTC-USD'].map((s) => <option key={s}>{s}</option>)}
+          </select>
+          <select className="input w-auto" value={direction} onChange={(e) => setDirection(e.target.value as any)}
+            title="Auto: theo đúng xu hướng H1 (an toàn nhất). Buộc BUY/SELL: tự chọn hướng, kể cả ngược xu hướng (rủi ro cao hơn).">
+            <option value="AUTO">Auto (theo xu hướng H1)</option>
+            <option value="BUY">Buộc BUY</option>
+            <option value="SELL">Buộc SELL</option>
           </select>
           <button className="btn" onClick={create} disabled={creating}>
             {creating ? '🤖 AI đang phân tích...' : '🎯 Tạo setup mới'}

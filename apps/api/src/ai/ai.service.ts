@@ -264,7 +264,7 @@ export class AiService {
 
   // ================= Setup lệnh: entry/SL/TP + theo dõi kết quả =================
 
-  async createSetup(userId: string, symbolRaw: string) {
+  async createSetup(userId: string, symbolRaw: string, wantDirection: 'AUTO' | 'BUY' | 'SELL' = 'AUTO') {
     const symbol = symbolRaw.toUpperCase();
     const [h1, h1c, spotQ, market] = await Promise.all([
       this.market.candles(symbol, '15m').catch(() => [] as Candle[]),
@@ -349,13 +349,18 @@ export class AiService {
     // giải thích không khớp con số hiển thị, và có lúc chọn nhầm TP không phải vùng gần nhất.
     // Sửa tận gốc: thuật toán tất định chọn Order Block/FVG + vùng thanh khoản, AI chỉ được giao
     // NHIỆM VỤ DUY NHẤT là viết lại lý do bằng lời cho các con số đã chốt — không được đổi số.
-    if (!h1Trend) {
+    if (!h1Trend && wantDirection === 'AUTO') {
       return {
         noTrade: true,
         reason: 'Chưa xác định được xu hướng H1 (thiếu dữ liệu cấu trúc lẫn EMA) — đứng ngoài chờ dữ liệu rõ ràng hơn.',
       };
     }
-    const bull = h1Trend === 'TĂNG';
+    // AUTO: đi theo đúng xu hướng H1 (an toàn nhất, đã là mặc định từ trước). Nếu người dùng chủ
+    // động chọn BUY hoặc SELL, cho phép tạo cả lệnh ngược xu hướng — nhưng phải cảnh báo rõ ràng
+    // trong lý do, không được ngầm coi đó là lệnh thuận xu hướng.
+    const bull = wantDirection === 'AUTO' ? h1Trend === 'TĂNG' : wantDirection === 'BUY';
+    const counterTrend = wantDirection !== 'AUTO' && h1Trend != null &&
+      ((wantDirection === 'BUY' && h1Trend === 'GIẢM') || (wantDirection === 'SELL' && h1Trend === 'TĂNG'));
     const dirMatch = (z: Zone) => (bull ? z.direction === 'bull' : z.direction === 'bear');
     const zoneDist = (z: Zone) => Math.abs(spot - (bull ? z.top : z.bottom));
 
@@ -365,9 +370,12 @@ export class AiService {
     const picked = obCandidates[0] ? { zone: obCandidates[0], kind: 'Order Block' } : fvgCandidates[0] ? { zone: fvgCandidates[0], kind: 'FVG' } : null;
 
     if (!picked) {
+      const dirLabel = bull ? 'BUY' : 'SELL';
       return {
         noTrade: true,
-        reason: `Xu hướng H1 là ${h1Trend} nhưng chưa có Order Block/FVG M15 nào (chưa bị lấp) đủ gần giá theo đúng hướng — chưa đủ điều kiện SMC để vào lệnh, đứng ngoài chờ giá tạo vùng mới.`,
+        reason: wantDirection === 'AUTO'
+          ? `Xu hướng H1 là ${h1Trend} nhưng chưa có Order Block/FVG M15 nào (chưa bị lấp) đủ gần giá theo đúng hướng — chưa đủ điều kiện SMC để vào lệnh, đứng ngoài chờ giá tạo vùng mới.`
+          : `Bạn chọn ${dirLabel} nhưng chưa có Order Block/FVG M15 nào (chưa bị lấp) đủ gần giá theo hướng ${dirLabel} — chưa đủ điều kiện SMC để vào lệnh theo hướng này, đứng ngoài chờ giá tạo vùng mới.`,
       };
     }
     const { zone, kind } = picked;
@@ -402,11 +410,17 @@ export class AiService {
     const direction: 'BUY' | 'SELL' = bull ? 'BUY' : 'SELL';
 
     // Lời giải thích mẫu — LUÔN khớp 100% với số liệu vì dùng chính các biến đã tính ở trên
+    const trendClause = h1Trend
+      ? (lastH1Event ? `${eventAgeText} có ${lastH1Event.type} xác nhận xu hướng ${h1Trend.toLowerCase()}` : `theo EMA đang ${h1Trend.toLowerCase()}`)
+      : 'chưa xác định rõ ràng (thiếu cả cấu trúc BOS/CHOCH lẫn EMA), thực hiện theo hướng bạn tự chọn';
+    const warnClause = counterTrend
+      ? ` ⚠️ Đây là lệnh NGƯỢC xu hướng H1 hiện tại (đang ${h1Trend?.toLowerCase()}) theo lựa chọn thủ công của bạn — rủi ro cao hơn lệnh thuận xu hướng, chỉ nên vào khi có tín hiệu đảo chiều mạnh và quản lý vốn chặt chẽ.`
+      : '';
     const templateReason =
-      `Cấu trúc H1 ${lastH1Event ? `${eventAgeText} có ${lastH1Event.type} xác nhận xu hướng ${h1Trend.toLowerCase()}` : `theo EMA đang ${h1Trend.toLowerCase()}`}. ` +
+      `Cấu trúc H1 ${trendClause}. ` +
       `Xuất hiện ${bull ? 'Bullish' : 'Bearish'} ${kind} tại vùng ${zone.bottom.toFixed(2)}-${zone.top.toFixed(2)}, gần giá hiện tại. Chờ giá hồi vào vùng này để vào ${direction} tại ${entry.toFixed(2)}. ` +
       `Stop Loss đặt ${bull ? 'dưới' : 'trên'} vùng ${kind} tại ${sl.toFixed(2)} nhằm tránh nhiễu. ` +
-      `Take Profit đặt tại ${tpNote}, đạt tỷ lệ Risk:Reward 1:${rr}.`;
+      `Take Profit đặt tại ${tpNote}, đạt tỷ lệ Risk:Reward 1:${rr}.` + warnClause;
 
     // AI chỉ được giao viết lại lời giải cho số liệu ĐÃ CHỐT — không được tạo hay đổi số mới
     const aiReason = await this.callLlm([
@@ -423,8 +437,9 @@ export class AiService {
           `Setup đã được thuật toán SMC chốt từ dữ liệu trên — các con số dưới đây là CUỐI CÙNG, không được đổi:\n` +
           `- Hướng: ${direction}\n- Entry: ${entry.toFixed(2)} (rìa ${bull ? 'Bullish' : 'Bearish'} ${kind} [${zone.bottom.toFixed(2)}-${zone.top.toFixed(2)}])\n` +
           `- Stop Loss: ${sl.toFixed(2)}\n- Take Profit: ${tp.toFixed(2)} (${tpNote})\n- RR: 1:${rr}\n` +
-          `- Xu hướng H1: ${h1Trend}${lastH1Event ? ` (${eventAgeText} có ${lastH1Event.type} — dùng đúng cụm từ về thời gian này, KHÔNG tự đổi thành "vừa" nếu không phải vừa xảy ra)` : ' (theo EMA, H1 chưa có phá cấu trúc)'}\n\n` +
-          `Viết 2-3 câu tiếng Việt giải thích NGẮN GỌN vì sao chọn đúng các con số này. Không liệt kê phương án khác, không đổi số.`,
+          `- Xu hướng H1: ${h1Trend ?? 'chưa xác định rõ'}${lastH1Event ? ` (${eventAgeText} có ${lastH1Event.type} — dùng đúng cụm từ về thời gian này, KHÔNG tự đổi thành "vừa" nếu không phải vừa xảy ra)` : ' (theo EMA, H1 chưa có phá cấu trúc)'}\n` +
+          (counterTrend ? `- LƯU Ý BẮT BUỘC: đây là lệnh NGƯỢC xu hướng H1 do người dùng tự chọn hướng — PHẢI nêu rõ trong câu giải thích rằng đây là lệnh ngược xu hướng, rủi ro cao hơn.\n` : '') +
+          `\nViết 2-3 câu tiếng Việt giải thích NGẮN GỌN vì sao chọn đúng các con số này. Không liệt kê phương án khác, không đổi số.`,
       },
     ], 0.2);
 
@@ -433,7 +448,7 @@ export class AiService {
       data: {
         userId, symbol, direction,
         entry: +entry.toFixed(4), sl: +sl.toFixed(4), tp: +tp.toFixed(4), rr,
-        reasoning: `[Xu hướng H1: ${h1Trend} | nến lệch spot ${divergePct.toFixed(2)}%] ${finalReasoning}`.slice(0, 2000),
+        reasoning: `[Xu hướng H1: ${h1Trend ?? 'chưa xác định'} | nến lệch spot ${divergePct.toFixed(2)}%${counterTrend ? ' | ⚠️ NGƯỢC XU HƯỚNG (chọn thủ công)' : ''}] ${finalReasoning}`.slice(0, 2000),
         source: aiReason ? 'SMC' : 'SMC-ALGO',
       },
     });
