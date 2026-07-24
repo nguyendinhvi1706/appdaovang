@@ -95,8 +95,10 @@ export class MarketService {
   }
 
 
-  /** Nến OHLC từ Yahoo Finance — dùng chung cho AI Trader và SMC engine */
-  candles(symbol: string, interval: '5m' | '15m' | '30m' | '1h' | '4h' | '1d' = '1h'): Promise<Candle[]> {
+  /** Nến OHLC từ Yahoo Finance — dùng chung cho AI Trader và SMC engine. Trả kèm `ticker` thực tế
+   *  đã dùng (VD "XAUUSD=X" hay fallback "GC=F") để nơi cần độ chính xác giá (Setup lệnh) tự quyết
+   *  định có tin dữ liệu hay không — xem candlesWithSource(). */
+  private candlesRaw(symbol: string, interval: '5m' | '15m' | '30m' | '1h' | '4h' | '1d' = '1h'): Promise<{ data: Candle[]; ticker: string | null }> {
     const ranges: Record<string, string> = { '5m': '5d', '15m': '5d', '30m': '1mo', '1h': '1mo', '4h': '3mo', '1d': '6mo' };
     const yInterval = interval === '4h' ? '1h' : interval; // Yahoo không có 4h, gộp từ 1h
     return this.cached(`candles:${symbol}:${interval}`, 60_000, async () => {
@@ -109,6 +111,7 @@ export class MarketService {
         : [symbol];
 
       let best: Candle[] | null = null;
+      let bestTicker: string | null = null;
       for (const y of candidates) {
         for (const host of ['query1', 'query2']) {
           try {
@@ -138,8 +141,8 @@ export class MarketService {
               // Nến phải TƯƠI — nguồn treo/trễ sẽ làm EMA tính sai xu hướng
               const maxAge: Record<string, number> = { '5m': 3 * 3600, '15m': 3 * 3600, '30m': 6 * 3600, '1h': 12 * 3600, '4h': 24 * 3600, '1d': 4 * 86400 };
               const ageSec = Date.now() / 1000 - out[out.length - 1].time;
-              if (ageSec <= (maxAge[interval] ?? 12 * 3600)) return out.slice(-500);
-              if (!best || out[out.length - 1].time > best[best.length - 1].time) best = out;
+              if (ageSec <= (maxAge[interval] ?? 12 * 3600)) return { data: out.slice(-500), ticker: y };
+              if (!best || out[out.length - 1].time > best[best.length - 1].time) { best = out; bestTicker = y; }
               console.warn(`[candles] ${y} @${host}: nến trễ ${(ageSec / 3600).toFixed(1)}h — thử nguồn khác`);
             }
           } catch (e: any) {
@@ -148,8 +151,23 @@ export class MarketService {
         }
       }
       // Không nguồn nào tươi (VD: cuối tuần thị trường đóng cửa) → trả nguồn mới nhất có được
-      return best ? best.slice(-500) : [];
+      return best ? { data: best.slice(-500), ticker: bestTicker } : { data: [], ticker: null };
     });
+  }
+
+  candles(symbol: string, interval: '5m' | '15m' | '30m' | '1h' | '4h' | '1d' = '1h'): Promise<Candle[]> {
+    return this.candlesRaw(symbol, interval).then((r) => r.data);
+  }
+
+  /** Như candles(), nhưng kèm ticker nguồn thực tế — dùng ở nơi cần biết có đang lấy nhầm giá
+   *  hợp đồng tương lai (GC=F/SI=F) thay vì giá spot thật (XAUUSD=X) hay không, VD Setup lệnh. */
+  candlesWithSource(symbol: string, interval: '5m' | '15m' | '30m' | '1h' | '4h' | '1d' = '1h'): Promise<{ data: Candle[]; ticker: string | null }> {
+    return this.candlesRaw(symbol, interval);
+  }
+
+  /** true nếu ticker là hợp đồng tương lai (basis trôi theo thời gian, không phải giá spot thật) */
+  static isFuturesTicker(ticker: string | null): boolean {
+    return !!ticker && /=F$/.test(ticker);
   }
 
   gold() {

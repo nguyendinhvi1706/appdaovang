@@ -348,15 +348,26 @@ export class AiService implements OnModuleInit {
     method: 'SMC' | 'SK' = 'SMC',
   ) {
     const symbol = symbolRaw.toUpperCase();
-    const [h1, h1c, spotQ, market] = await Promise.all([
-      this.market.candles(symbol, '15m').catch(() => [] as Candle[]),
+    const [h1Res, h1c, spotQ, market] = await Promise.all([
+      this.market.candlesWithSource(symbol, '15m').catch(() => ({ data: [] as Candle[], ticker: null as string | null })),
       this.market.candles(symbol, '1h').catch(() => [] as Candle[]),
       this.market.quote(symbol).catch(() => null),
       this.buildMarketContext(symbol, '15m'),
     ]);
+    const h1 = h1Res.data;
     const spot = spotQ?.price ?? market.price;
     if (spot == null || h1.length < 60) {
       throw new ServiceUnavailableException(`Không đủ dữ liệu thị trường cho ${symbol}.`);
+    }
+    if (MarketService.isFuturesTicker(h1Res.ticker)) {
+      // Nến M15 đang rơi về hợp đồng tương lai (GC=F/SI=F) thay vì giá spot thật (XAUUSD=X) — basis
+      // trôi theo thời gian nên không thể bù đơn giản mà tin tưởng được entry/SL/TP tính ra. Từ chối
+      // tạo setup thay vì tự tin báo sai (đã xảy ra thực tế: setup báo "Thắng" trong khi giá spot
+      // thật chưa từng chạm TP).
+      return {
+        noTrade: true,
+        reason: `Nguồn nến M15 hiện là hợp đồng tương lai (${h1Res.ticker}) thay vì giá spot thật — không đủ tin cậy để tính entry/SL/TP. Thử lại sau vài phút khi nguồn spot (XAUUSD=X) sẵn sàng trở lại.`,
+      };
     }
 
     // EMA H1 — chỉ dùng làm dự phòng khi H1 chưa đủ dữ liệu để xác định cấu trúc (BOS/CHOCH)
@@ -374,7 +385,8 @@ export class AiService implements OnModuleInit {
       };
     }
 
-    // Bù basis nếu nến là futures (GC=F) — quy toàn bộ mức giá SMC/Fibonacci bên dưới về hệ giá spot
+    // Futures (GC=F) đã bị chặn ở trên — offM ở đây chỉ còn bù lệch nhỏ, ổn định giữa 2 nguồn spot
+    // (Yahoo XAUUSD=X vs Swissquote), không phải bù basis futures trôi theo thời gian
     const offM = spot - lastClose;
     const aRef = atr(h1) ?? spot * 0.005;
     const m15Swings = detectSwings(h1);
@@ -622,17 +634,29 @@ export class AiService implements OnModuleInit {
       const iv = (ageDays > 4 ? '1h' : '5m') as '5m' | '1h';
       const key = `${s.symbol}:${iv}`;
       if (!cache.has(key)) {
-        let cs = await this.market.candles(s.symbol, iv).catch(() => [] as Candle[]);
-        // Quy nến về cùng hệ giá spot với entry/SL/TP — nguồn futures (GC=F) lệch basis
-        // sẽ làm lệnh chạm TP/SL thật mà hệ thống không nhận ra
-        const q = await this.market.quote(s.symbol).catch(() => null);
-        if (q?.price != null && cs.length) {
-          const off = q.price - cs[cs.length - 1].close;
-          if (Math.abs(off) / q.price > 0.0005) {
-            cs = cs.map((c) => ({
-              time: c.time,
-              open: c.open + off, high: c.high + off, low: c.low + off, close: c.close + off,
-            }));
+        const { data, ticker } = await this.market
+          .candlesWithSource(s.symbol, iv)
+          .catch(() => ({ data: [] as Candle[], ticker: null as string | null }));
+        let cs = data;
+        if (MarketService.isFuturesTicker(ticker)) {
+          // Nguồn là hợp đồng tương lai (GC=F/SI=F) chứ không phải giá spot thật — basis với spot
+          // trôi theo thời gian (không cố định), nên bù lệch đơn giản kiểu "dịch đều cả chuỗi nến
+          // theo lệch hiện tại" có thể sai vài đô so với giá spot thật ở từng thời điểm trong quá
+          // khứ — đủ để báo nhầm khớp entry/SL/TP (đã xảy ra thực tế). An toàn hơn: bỏ qua lượt
+          // kiểm tra này, giữ nguyên trạng thái, thử lại khi nguồn spot thật sẵn sàng.
+          cs = [];
+        } else {
+          // Nguồn spot thật — chỉ bù lệch nhỏ, ổn định giữa Yahoo XAUUSD=X và Swissquote (2 nhà
+          // cung cấp giá spot khác nhau), không phải bù basis futures.
+          const q = await this.market.quote(s.symbol).catch(() => null);
+          if (q?.price != null && cs.length) {
+            const off = q.price - cs[cs.length - 1].close;
+            if (Math.abs(off) / q.price > 0.0005) {
+              cs = cs.map((c) => ({
+                time: c.time,
+                open: c.open + off, high: c.high + off, low: c.low + off, close: c.close + off,
+              }));
+            }
           }
         }
         cache.set(key, cs);
