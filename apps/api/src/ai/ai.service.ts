@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { MarketService } from '../market/market.service';
@@ -37,6 +37,8 @@ Nguyên tắc:
 
 @Injectable()
 export class AiService implements OnModuleInit {
+  private readonly logger = new Logger(AiService.name);
+
   constructor(private prisma: PrismaService, private market: MarketService, private telegram: TelegramService) {}
 
   onModuleInit() {
@@ -68,6 +70,7 @@ export class AiService implements OnModuleInit {
       where: { telegramChatId: { not: null } },
       select: { id: true },
     });
+    let created = 0, skippedOpen = 0, noTrade = 0, errored = 0;
     for (const u of users) {
       const watch = await this.prisma.watchlistItem.findMany({ where: { userId: u.id }, take: 5 });
       const symbols = watch.length ? watch.map((w) => w.symbol) : ['XAUUSD'];
@@ -80,11 +83,19 @@ export class AiService implements OnModuleInit {
 
       for (const symbol of symbols) {
         for (const method of ['SMC', 'SK'] as const) {
-          if (hasOpen(symbol, method)) continue;
-          await this.createSetup(u.id, symbol, 'AUTO', method).catch(() => {});
+          if (hasOpen(symbol, method)) { skippedOpen++; continue; }
+          try {
+            const res: any = await this.createSetup(u.id, symbol, 'AUTO', method);
+            if (res?.noTrade) noTrade++; else created++;
+          } catch {
+            errored++;
+          }
         }
       }
     }
+    this.logger.log(
+      `Auto-scan: ${users.length} user đã nối Telegram | tạo mới: ${created} | đứng ngoài (chưa đủ điều kiện): ${noTrade} | bỏ qua (đã có lệnh mở): ${skippedOpen} | lỗi: ${errored}`,
+    );
   }
 
   private detectSymbol(text: string): string {
