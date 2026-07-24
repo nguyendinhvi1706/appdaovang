@@ -49,6 +49,42 @@ export class AiService implements OnModuleInit {
     setInterval(() => {
       this.checkAllOpenSetups().catch(() => {});
     }, 90_000);
+
+    // Tự động tìm setup mới cho người dùng đã kết nối Telegram — kể cả khi họ không mở app,
+    // không bấm "Tạo setup mới". Chạy thưa hơn (15 phút) vì dựa trên khung M15/H1, tạo liên tục
+    // không có ý nghĩa và tốn API thị trường + AI. Chạy lần đầu sau 20s (không đợi đủ 15 phút mới
+    // có báo đầu tiên sau khi server vừa khởi động/deploy xong).
+    setTimeout(() => this.autoGenerateSetups().catch(() => {}), 20_000);
+    setInterval(() => {
+      this.autoGenerateSetups().catch(() => {});
+    }, 15 * 60_000);
+  }
+
+  /** Tự tạo setup (AUTO direction, cả 2 phương pháp SMC + SK) cho mọi user đã kết nối Telegram —
+   *  theo watchlist của họ (rơi về XAUUSD nếu watchlist trống). Bỏ qua symbol/phương pháp nào đã
+   *  có setup PENDING/RUNNING để tránh spam trùng lặp; noTrade thì im lặng bỏ qua, không báo. */
+  private async autoGenerateSetups() {
+    const users = await this.prisma.user.findMany({
+      where: { telegramChatId: { not: null } },
+      select: { id: true },
+    });
+    for (const u of users) {
+      const watch = await this.prisma.watchlistItem.findMany({ where: { userId: u.id }, take: 5 });
+      const symbols = watch.length ? watch.map((w) => w.symbol) : ['XAUUSD'];
+      const open = await this.prisma.aiSetup.findMany({
+        where: { userId: u.id, status: { in: ['PENDING', 'RUNNING'] } },
+        select: { symbol: true, source: true },
+      });
+      const hasOpen = (symbol: string, method: 'SMC' | 'SK') =>
+        open.some((o) => o.symbol === symbol.toUpperCase() && o.source.startsWith(method));
+
+      for (const symbol of symbols) {
+        for (const method of ['SMC', 'SK'] as const) {
+          if (hasOpen(symbol, method)) continue;
+          await this.createSetup(u.id, symbol, 'AUTO', method).catch(() => {});
+        }
+      }
+    }
   }
 
   private detectSymbol(text: string): string {

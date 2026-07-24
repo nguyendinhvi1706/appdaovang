@@ -167,14 +167,17 @@ function TelegramCard() {
 
       {status.configured && !status.connected && (
         <div className="mt-2">
-          <p className="text-sm text-gray-400 mb-2">Kết nối để nhận báo ngay khi có setup entry mới, khi giá khớp entry, và khi lệnh thắng/thua — kể cả lúc bạn không mở app.</p>
+          <p className="text-sm text-gray-400 mb-2">Kết nối để hệ thống TỰ ĐỘNG tìm setup mới (cả SMC lẫn SK System, theo watchlist của bạn) và báo về Telegram mỗi ~15 phút — không cần mở app hay bấm "Tạo setup mới". Khi lệnh khớp entry / thắng / thua cũng tự báo.</p>
           <a href={status.linkUrl!} target="_blank" rel="noreferrer" className="btn inline-block">🔗 Kết nối Telegram</a>
         </div>
       )}
       {status.connected && (
-        <div className="mt-2 flex items-center gap-2 flex-wrap">
-          <button className="px-3 py-2 rounded-lg border border-border hover:border-accent text-sm" onClick={test} disabled={busy}>Gửi thử</button>
-          <button className="px-3 py-2 rounded-lg border border-border hover:border-red-400 text-sm text-gray-400" onClick={disconnect} disabled={busy}>Ngắt kết nối</button>
+        <div className="mt-2">
+          <p className="text-sm text-gray-400 mb-2">Đang tự động quét watchlist mỗi ~15 phút (cả SMC lẫn SK System) và báo Telegram — không cần mở app.</p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button className="px-3 py-2 rounded-lg border border-border hover:border-accent text-sm" onClick={test} disabled={busy}>Gửi thử</button>
+            <button className="px-3 py-2 rounded-lg border border-border hover:border-red-400 text-sm text-gray-400" onClick={disconnect} disabled={busy}>Ngắt kết nối</button>
+          </div>
         </div>
       )}
 
