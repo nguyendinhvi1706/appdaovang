@@ -57,15 +57,15 @@ Mở `https://appdaovang.vercel.app` trên trình duyệt điện thoại → đ
 
 ## Bước 6 — Báo lệnh qua Telegram (tùy chọn)
 
+Cấu hình ngay trong app, không cần vào Render:
+
 1. Trên Telegram, chat với **@BotFather** → gõ `/newbot` → đặt tên hiển thị và username (phải kết thúc bằng `bot`, VD `appdaovang_bot`)
 2. BotFather trả về một **token** dạng `123456:ABC-...` → copy lại, và ghi nhớ **username** (không có `@`)
-3. Vào Render → API service → Environment → thêm:
-   - `TELEGRAM_BOT_TOKEN` = token vừa lấy
-   - `TELEGRAM_BOT_USERNAME` = username bot (không `@`)
-4. Save → Render tự redeploy. Vào app → mục **AI Trader → Setup lệnh** → bấm "🔗 Kết nối Telegram" → bot sẽ tự nhắn xác nhận khi liên kết xong
+3. Vào app → mục **AI Trader → Setup lệnh** → thẻ "📲 Báo lệnh qua Telegram" → dán Token + Username vào form → "💾 Lưu cấu hình bot"
+4. Bấm "🔗 Kết nối Telegram" → bot sẽ tự nhắn xác nhận khi liên kết xong (không cần redeploy, có hiệu lực ngay)
 5. Từ giờ mỗi lần tạo setup mới, khớp entry, thắng hoặc thua đều có tin nhắn báo tự động — kể cả lúc không mở app (server tự quét nền mỗi ~90 giây trong lúc đang thức)
 
-Nếu để trống 2 biến trên, mục Telegram trong app tự ẩn, không ảnh hưởng gì đến các tính năng khác.
+Nếu chưa cấu hình, thẻ Telegram trong app tự hiện form nhập — không ảnh hưởng gì đến các tính năng khác. (Vẫn có thể đặt qua biến môi trường `TELEGRAM_BOT_TOKEN`/`TELEGRAM_BOT_USERNAME` trên Render nếu muốn, nhưng không bắt buộc nữa.)
 
 ## Giới hạn free tier cần biết
 

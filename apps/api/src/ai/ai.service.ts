@@ -41,11 +41,11 @@ export class AiService implements OnModuleInit {
 
   onModuleInit() {
     // Quét nền định kỳ để báo Telegram cả khi người dùng KHÔNG mở app (không phụ thuộc vào việc
-    // họ tự bấm "Cập nhật kết quả"). Chỉ bật khi đã cấu hình bot để tránh tốn API thị trường vô ích.
-    // Lưu ý: trên Render free tier, server có thể "ngủ" khi không có traffic — vòng lặp này chỉ
-    // chạy trong lúc server đang thức; dùng dịch vụ ping miễn phí (VD UptimeRobot) nếu muốn báo gần
-    // như tức thời.
-    if (!process.env.TELEGRAM_BOT_TOKEN) return;
+    // họ tự bấm "Cập nhật kết quả"). Luôn bật (không gate theo env nữa) vì bot giờ cấu hình được
+    // ngay trong app, có thể bật sau mà không cần restart server; nếu chưa có setup nào đang mở
+    // thì vòng lặp gần như không tốn gì. Lưu ý: trên Render free tier, server có thể "ngủ" khi
+    // không có traffic — vòng lặp này chỉ chạy trong lúc server đang thức; dùng dịch vụ ping miễn
+    // phí (VD UptimeRobot) nếu muốn báo gần như tức thời.
     setInterval(() => {
       this.checkAllOpenSetups().catch(() => {});
     }, 90_000);

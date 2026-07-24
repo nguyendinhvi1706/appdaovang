@@ -100,17 +100,39 @@ function ChatTab() {
   );
 }
 
-type TelegramStatus = { connected: boolean; configured: boolean; linkUrl: string | null };
+type TelegramStatus = {
+  connected: boolean; configured: boolean; hasToken: boolean; botUsername: string | null; linkUrl: string | null;
+};
 
 function TelegramCard() {
   const [status, setStatus] = useState<TelegramStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [showForm, setShowForm] = useState(false);
+  const [botToken, setBotToken] = useState('');
+  const [botUsername, setBotUsername] = useState('');
 
   const load = useCallback(async () => {
-    try { setStatus(await api<TelegramStatus>('/telegram/status')); } catch {}
+    try {
+      const s = await api<TelegramStatus>('/telegram/status');
+      setStatus(s);
+      setBotUsername(s.botUsername ?? '');
+    } catch {}
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  async function saveConfig() {
+    setBusy(true); setNotice('');
+    try {
+      await api('/telegram/config', { method: 'POST', body: JSON.stringify({ botToken: botToken || undefined, botUsername: botUsername || undefined }) });
+      setBotToken('');
+      setShowForm(false);
+      setNotice('✅ Đã lưu cấu hình bot.');
+      await load();
+    } catch (err: any) {
+      setNotice(`❌ ${err.message}`);
+    } finally { setBusy(false); }
+  }
 
   async function test() {
     setBusy(true); setNotice('');
@@ -136,12 +158,13 @@ function TelegramCard() {
         <span className="text-lg">📲</span>
         <span className="font-semibold">Báo lệnh qua Telegram</span>
         {status.connected && <span className="text-xs px-2 py-0.5 rounded-full border border-green-500/40 text-green-400">Đã kết nối</span>}
+        {status.configured && (
+          <button className="text-xs text-gray-500 hover:text-accent ml-auto" onClick={() => setShowForm((v) => !v)}>
+            ⚙️ {showForm ? 'Đóng' : 'Đổi cấu hình bot'}
+          </button>
+        )}
       </div>
-      {!status.configured && (
-        <p className="text-xs text-gray-500 mt-2">
-          Chưa cấu hình bot Telegram phía server (thiếu TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_USERNAME). Xem hướng dẫn tạo bot trong DEPLOY.md.
-        </p>
-      )}
+
       {status.configured && !status.connected && (
         <div className="mt-2">
           <p className="text-sm text-gray-400 mb-2">Kết nối để nhận báo ngay khi có setup entry mới, khi giá khớp entry, và khi lệnh thắng/thua — kể cả lúc bạn không mở app.</p>
@@ -152,6 +175,25 @@ function TelegramCard() {
         <div className="mt-2 flex items-center gap-2 flex-wrap">
           <button className="px-3 py-2 rounded-lg border border-border hover:border-accent text-sm" onClick={test} disabled={busy}>Gửi thử</button>
           <button className="px-3 py-2 rounded-lg border border-border hover:border-red-400 text-sm text-gray-400" onClick={disconnect} disabled={busy}>Ngắt kết nối</button>
+        </div>
+      )}
+
+      {(!status.configured || showForm) && (
+        <div className="mt-3 bg-surface rounded-lg p-3 border border-border">
+          <p className="text-xs text-gray-400 mb-2">
+            Tạo bot miễn phí (1 lần): mở Telegram, chat với <b>@BotFather</b> → gõ <code>/newbot</code> → đặt tên → BotFather trả về <b>token</b> và <b>username</b> bot (kết thúc bằng "bot"). Dán vào đây:
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            <input
+              className="input" type="password" placeholder={status.hasToken ? 'Token đã lưu — để trống nếu không đổi' : 'Bot Token (VD 123456:ABC-...)'}
+              value={botToken} onChange={(e) => setBotToken(e.target.value)}
+            />
+            <input
+              className="input" type="text" placeholder="Bot Username (VD appdaovang_bot, không có @)"
+              value={botUsername} onChange={(e) => setBotUsername(e.target.value)}
+            />
+          </div>
+          <button className="btn mt-2" onClick={saveConfig} disabled={busy || (!botToken && !botUsername)}>💾 Lưu cấu hình bot</button>
         </div>
       )}
       {notice && <p className="text-xs text-gray-400 mt-2">{notice}</p>}

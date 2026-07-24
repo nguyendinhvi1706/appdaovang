@@ -1,7 +1,16 @@
-import { BadRequestException, Controller, Get, Post, Request, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Post, Request, UseGuards } from '@nestjs/common';
+import { IsOptional, IsString } from 'class-validator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramService } from './telegram.service';
+
+class SaveTelegramConfigDto {
+  @IsOptional() @IsString()
+  botToken?: string;
+
+  @IsOptional() @IsString()
+  botUsername?: string;
+}
 
 @UseGuards(JwtAuthGuard)
 @Controller('telegram')
@@ -11,12 +20,21 @@ export class TelegramController {
   @Get('status')
   async status(@Request() req: any) {
     const user = await this.prisma.user.findUnique({ where: { id: req.user.id } });
-    const botUsername = process.env.TELEGRAM_BOT_USERNAME;
+    const cfg = await this.telegram.getConfig();
     return {
       connected: !!user?.telegramChatId,
-      configured: !!process.env.TELEGRAM_BOT_TOKEN && !!botUsername,
-      linkUrl: botUsername ? `https://t.me/${botUsername}?start=${req.user.id}` : null,
+      configured: !!cfg.token && !!cfg.username,
+      hasToken: !!cfg.token,
+      botUsername: cfg.username ?? null,
+      linkUrl: cfg.username ? `https://t.me/${cfg.username}?start=${req.user.id}` : null,
     };
+  }
+
+  @Post('config')
+  async saveConfig(@Body() dto: SaveTelegramConfigDto) {
+    if (!dto.botToken && !dto.botUsername) throw new BadRequestException('Thiếu token hoặc username bot.');
+    await this.telegram.saveConfig(dto.botToken, dto.botUsername);
+    return { ok: true };
   }
 
   @Post('test')

@@ -160,6 +160,13 @@ enum SetupStatus {
   CANCELLED
 }
 
+// Cấu hình toàn app dạng key-value, cấu hình được ngay trong giao diện thay vì phải sửa biến môi
+// trường trên Render — hiện dùng cho bot token/username Telegram (telegram_bot_token, telegram_bot_username).
+model AppSetting {
+  key   String @id
+  value String
+}
+
 model AiSetup {
   id          String      @id @default(cuid())
   userId      String

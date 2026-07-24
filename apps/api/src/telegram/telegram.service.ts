@@ -15,33 +15,59 @@ export class TelegramService implements OnModuleInit {
 
   constructor(private prisma: PrismaService) {}
 
-  private get token(): string | undefined {
-    return process.env.TELEGRAM_BOT_TOKEN;
+  /** Cấu hình bot lấy từ DB (nhập ngay trong app) trước, thiếu thì rơi về biến môi trường —
+   *  cho phép cấu hình trực tiếp trên giao diện mà không cần đụng tới Render dashboard. */
+  async getConfig(): Promise<{ token?: string; username?: string }> {
+    const rows = await this.prisma.appSetting.findMany({
+      where: { key: { in: ['telegram_bot_token', 'telegram_bot_username'] } },
+    });
+    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    return {
+      token: map['telegram_bot_token'] || process.env.TELEGRAM_BOT_TOKEN,
+      username: map['telegram_bot_username'] || process.env.TELEGRAM_BOT_USERNAME,
+    };
+  }
+
+  async saveConfig(botToken?: string, botUsername?: string) {
+    if (botToken) {
+      await this.prisma.appSetting.upsert({
+        where: { key: 'telegram_bot_token' }, create: { key: 'telegram_bot_token', value: botToken }, update: { value: botToken },
+      });
+    }
+    if (botUsername) {
+      const clean = botUsername.replace(/^@/, '').trim();
+      await this.prisma.appSetting.upsert({
+        where: { key: 'telegram_bot_username' }, create: { key: 'telegram_bot_username', value: clean }, update: { value: clean },
+      });
+    }
+    // Bỏ qua update cũ tích lũy trước khi có token (nếu có) để lần poll tới không xử lý nhầm
+    this.offset = 0;
   }
 
   async onModuleInit() {
-    if (!this.token) return;
-    // Bỏ qua toàn bộ update đang chờ sẵn khi server khởi động — tránh xử lý lại các lệnh /start cũ
-    // (VD "chào lại" hoặc liên kết nhầm) mỗi lần Render free tier restart server.
-    try {
-      const pending = await this.fetchUpdates(0);
-      const ids = pending.map((u: any) => u.update_id);
-      this.offset = ids.length ? Math.max(...ids) + 1 : 0;
-    } catch (e) {
-      this.logger.warn(`Không lấy được update Telegram ban đầu: ${e}`);
-    }
+    // Không gate theo biến môi trường ở đây nữa — bot có thể được cấu hình sau, ngay trong app,
+    // không cần restart server. Mỗi vòng poll tự đọc lại cấu hình mới nhất từ DB.
     setInterval(() => this.pollOnce().catch((e) => this.logger.warn(`Poll Telegram lỗi: ${e}`)), 4000);
   }
 
-  private async fetchUpdates(offset: number): Promise<any[]> {
-    const res = await fetch(`https://api.telegram.org/bot${this.token}/getUpdates?offset=${offset}&timeout=0`);
+  private async fetchUpdates(token: string, offset: number): Promise<any[]> {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&timeout=0`);
     const data: any = await res.json();
     return data?.ok ? data.result : [];
   }
 
   private async pollOnce() {
-    if (!this.token) return;
-    const updates = await this.fetchUpdates(this.offset);
+    const { token } = await this.getConfig();
+    if (!token) return;
+    if (this.offset === 0) {
+      // Mới bật/đổi cấu hình (hoặc mới khởi động) — bỏ qua toàn bộ update cũ đang chờ sẵn để
+      // tránh xử lý lại các lệnh /start cũ mỗi lần Render free tier restart server.
+      const pending = await this.fetchUpdates(token, 0);
+      const ids = pending.map((u: any) => u.update_id);
+      this.offset = ids.length ? Math.max(...ids) + 1 : 1;
+      return;
+    }
+    const updates = await this.fetchUpdates(token, this.offset);
     for (const u of updates) {
       this.offset = u.update_id + 1;
       const text: string | undefined = u.message?.text;
@@ -68,9 +94,10 @@ export class TelegramService implements OnModuleInit {
   }
 
   async sendMessage(chatId: string, html: string) {
-    if (!this.token) return;
+    const { token } = await this.getConfig();
+    if (!token) return;
     try {
-      await fetch(`https://api.telegram.org/bot${this.token}/sendMessage`, {
+      await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, text: html, parse_mode: 'HTML', disable_web_page_preview: true }),
