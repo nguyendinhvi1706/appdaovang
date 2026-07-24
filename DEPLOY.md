@@ -55,6 +55,18 @@ git push -u origin main
 
 Mở `https://appdaovang.vercel.app` trên trình duyệt điện thoại → đăng ký tài khoản mới (DB cloud trống, tài khoản localhost không tự chuyển) → **Thêm vào màn hình chính** (Add to Home Screen) để dùng như app.
 
+## Bước 6 — Báo lệnh qua Telegram (tùy chọn)
+
+1. Trên Telegram, chat với **@BotFather** → gõ `/newbot` → đặt tên hiển thị và username (phải kết thúc bằng `bot`, VD `appdaovang_bot`)
+2. BotFather trả về một **token** dạng `123456:ABC-...` → copy lại, và ghi nhớ **username** (không có `@`)
+3. Vào Render → API service → Environment → thêm:
+   - `TELEGRAM_BOT_TOKEN` = token vừa lấy
+   - `TELEGRAM_BOT_USERNAME` = username bot (không `@`)
+4. Save → Render tự redeploy. Vào app → mục **AI Trader → Setup lệnh** → bấm "🔗 Kết nối Telegram" → bot sẽ tự nhắn xác nhận khi liên kết xong
+5. Từ giờ mỗi lần tạo setup mới, khớp entry, thắng hoặc thua đều có tin nhắn báo tự động — kể cả lúc không mở app (server tự quét nền mỗi ~90 giây trong lúc đang thức)
+
+Nếu để trống 2 biến trên, mục Telegram trong app tự ẩn, không ảnh hưởng gì đến các tính năng khác.
+
 ## Giới hạn free tier cần biết
 
 - **Render free ngủ sau 15 phút không dùng** → lần mở đầu chờ ~30-50 giây cho API thức dậy. Mẹo: dùng https://uptimerobot.com (free) ping URL API mỗi 10 phút để không ngủ.

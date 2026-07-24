@@ -13,6 +13,7 @@ import { SmcModule } from './smc/smc.module';
 import { BacktestModule } from './backtest/backtest.module';
 import { SharedModule } from './shared/shared.module';
 import { MarketplaceModule } from './marketplace/marketplace.module';
+import { TelegramModule } from './telegram/telegram.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { MarketplaceModule } from './marketplace/marketplace.module';
     BacktestModule,
     SharedModule,
     MarketplaceModule,
+    TelegramModule,
   ],
 })
 export class AppModule {}

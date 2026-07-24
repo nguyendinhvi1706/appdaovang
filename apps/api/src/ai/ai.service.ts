@@ -1,6 +1,8 @@
-import { Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, NotFoundException, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { MarketService } from '../market/market.service';
+import { TelegramService } from '../telegram/telegram.service';
 import { atr, Candle, ema, rsi, swingLevels } from './indicators';
 import { detectEqualLevels, detectFVG, detectOrderBlocks, detectStructure, detectSwings, Swing, Zone } from '../smc/smc.engine';
 
@@ -34,8 +36,20 @@ Nguyên tắc:
 - Cuối phân tích luôn ghi: "⚠️ Đây là phân tích tham khảo, không phải lời khuyên đầu tư."`;
 
 @Injectable()
-export class AiService {
-  constructor(private prisma: PrismaService, private market: MarketService) {}
+export class AiService implements OnModuleInit {
+  constructor(private prisma: PrismaService, private market: MarketService, private telegram: TelegramService) {}
+
+  onModuleInit() {
+    // Quét nền định kỳ để báo Telegram cả khi người dùng KHÔNG mở app (không phụ thuộc vào việc
+    // họ tự bấm "Cập nhật kết quả"). Chỉ bật khi đã cấu hình bot để tránh tốn API thị trường vô ích.
+    // Lưu ý: trên Render free tier, server có thể "ngủ" khi không có traffic — vòng lặp này chỉ
+    // chạy trong lúc server đang thức; dùng dịch vụ ping miễn phí (VD UptimeRobot) nếu muốn báo gần
+    // như tức thời.
+    if (!process.env.TELEGRAM_BOT_TOKEN) return;
+    setInterval(() => {
+      this.checkAllOpenSetups().catch(() => {});
+    }, 90_000);
+  }
 
   private detectSymbol(text: string): string {
     const m = text.toUpperCase().match(/\b(XAUUSD|XAGUSD|[A-Z]{3}(USD|JPY|EUR|GBP|CHF|AUD|CAD|NZD))\b/);
@@ -539,7 +553,7 @@ export class AiService {
     ], 0.2);
 
     const finalReasoning = (aiReason?.trim() || templateReason).slice(0, 1500);
-    return this.prisma.aiSetup.create({
+    const created = await this.prisma.aiSetup.create({
       data: {
         userId, symbol, direction,
         entry: +entry.toFixed(4), sl: +sl.toFixed(4), tp: +tp.toFixed(4), rr,
@@ -547,13 +561,14 @@ export class AiService {
         source: aiReason ? sourceTag : `${sourceTag}-ALGO`,
       },
     });
+    this.telegram.notifySetupCreated(userId, created).catch(() => {});
+    return created;
   }
 
-  /** Quét giá từ lúc tạo setup: khớp entry → RUNNING, chạm SL → LOSS, chạm TP → WIN (SL ưu tiên, bảo thủ) */
-  private async checkSetups(userId: string) {
-    const open = await this.prisma.aiSetup.findMany({
-      where: { userId, status: { in: ['PENDING', 'RUNNING'] } },
-    });
+  /** Quét giá từ lúc tạo setup: khớp entry → RUNNING, chạm SL → LOSS, chạm TP → WIN (SL ưu tiên, bảo thủ).
+   *  Dùng chung cho cả đường tương tác (user tự mở app) lẫn vòng lặp nền báo Telegram (mọi user). */
+  private async checkOpenSetups(where: Prisma.AiSetupWhereInput) {
+    const open = await this.prisma.aiSetup.findMany({ where });
     const cache = new Map<string, Candle[]>();
     for (const s of open) {
       const ageDays = (Date.now() - s.createdAt.getTime()) / 86_400_000;
@@ -598,8 +613,22 @@ export class AiService {
           where: { id: s.id },
           data: { status: status as any, triggeredAt, closedAt },
         });
+        // Báo Telegram đúng lúc trạng thái đổi (idempotent: lần quét sau thấy status đã khớp DB
+        // nên không gửi lại) — hoạt động cả từ vòng lặp nền lẫn khi user tự mở app.
+        if (status === 'RUNNING' || status === 'WIN' || status === 'LOSS') {
+          this.telegram.notifySetupEvent(s.userId, s, status).catch(() => {});
+        }
       }
     }
+  }
+
+  private async checkSetups(userId: string) {
+    await this.checkOpenSetups({ userId, status: { in: ['PENDING', 'RUNNING'] } });
+  }
+
+  /** Quét toàn bộ setup đang mở của MỌI người dùng — dùng cho vòng lặp nền báo Telegram định kỳ. */
+  async checkAllOpenSetups() {
+    await this.checkOpenSetups({ status: { in: ['PENDING', 'RUNNING'] } });
   }
 
   async listSetups(userId: string) {

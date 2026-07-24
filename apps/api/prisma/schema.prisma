@@ -8,11 +8,12 @@ datasource db {
 }
 
 model User {
-  id          String         @id @default(cuid())
-  email       String         @unique
-  password    String
-  name        String?
-  createdAt   DateTime       @default(now())
+  id             String         @id @default(cuid())
+  email          String         @unique
+  password       String
+  name           String?
+  telegramChatId String?        @unique // liên kết qua bot Telegram để nhận báo lệnh entry
+  createdAt      DateTime       @default(now())
   mt5Accounts Mt5Account[]
   watchlist   WatchlistItem[]
   journal     JournalEntry[]

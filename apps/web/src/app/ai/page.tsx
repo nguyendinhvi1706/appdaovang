@@ -100,6 +100,65 @@ function ChatTab() {
   );
 }
 
+type TelegramStatus = { connected: boolean; configured: boolean; linkUrl: string | null };
+
+function TelegramCard() {
+  const [status, setStatus] = useState<TelegramStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState('');
+
+  const load = useCallback(async () => {
+    try { setStatus(await api<TelegramStatus>('/telegram/status')); } catch {}
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  async function test() {
+    setBusy(true); setNotice('');
+    try {
+      await api('/telegram/test', { method: 'POST' });
+      setNotice('✅ Đã gửi tin nhắn thử — kiểm tra Telegram của bạn.');
+    } catch (err: any) {
+      setNotice(`❌ ${err.message}`);
+    } finally { setBusy(false); }
+  }
+
+  async function disconnect() {
+    setBusy(true); setNotice('');
+    try { await api('/telegram/disconnect', { method: 'POST' }); await load(); }
+    finally { setBusy(false); }
+  }
+
+  if (!status) return null;
+
+  return (
+    <div className="card mb-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-lg">📲</span>
+        <span className="font-semibold">Báo lệnh qua Telegram</span>
+        {status.connected && <span className="text-xs px-2 py-0.5 rounded-full border border-green-500/40 text-green-400">Đã kết nối</span>}
+      </div>
+      {!status.configured && (
+        <p className="text-xs text-gray-500 mt-2">
+          Chưa cấu hình bot Telegram phía server (thiếu TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_USERNAME). Xem hướng dẫn tạo bot trong DEPLOY.md.
+        </p>
+      )}
+      {status.configured && !status.connected && (
+        <div className="mt-2">
+          <p className="text-sm text-gray-400 mb-2">Kết nối để nhận báo ngay khi có setup entry mới, khi giá khớp entry, và khi lệnh thắng/thua — kể cả lúc bạn không mở app.</p>
+          <a href={status.linkUrl!} target="_blank" rel="noreferrer" className="btn inline-block">🔗 Kết nối Telegram</a>
+        </div>
+      )}
+      {status.connected && (
+        <div className="mt-2 flex items-center gap-2 flex-wrap">
+          <button className="px-3 py-2 rounded-lg border border-border hover:border-accent text-sm" onClick={test} disabled={busy}>Gửi thử</button>
+          <button className="px-3 py-2 rounded-lg border border-border hover:border-red-400 text-sm text-gray-400" onClick={disconnect} disabled={busy}>Ngắt kết nối</button>
+        </div>
+      )}
+      {notice && <p className="text-xs text-gray-400 mt-2">{notice}</p>}
+    </div>
+  );
+}
+
 function SetupsTab() {
   const [setups, setSetups] = useState<Setup[]>([]);
   const [symbol, setSymbol] = useState('XAUUSD');
@@ -148,6 +207,7 @@ function SetupsTab() {
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0">
+      <TelegramCard />
       <div className="card mb-4">
         <div className="flex items-center gap-3 flex-wrap">
           <select className="input w-auto" value={symbol} onChange={(e) => setSymbol(e.target.value)}>

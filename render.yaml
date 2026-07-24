@@ -20,3 +20,7 @@ services:
         value: llama-3.3-70b-versatile
       - key: AI_API_KEY
         sync: false # key miễn phí từ console.groq.com
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false # tùy chọn — token bot từ @BotFather, để trống nếu không dùng báo Telegram
+      - key: TELEGRAM_BOT_USERNAME
+        sync: false # tùy chọn — username bot (không có @)
