@@ -104,6 +104,7 @@ function SetupsTab() {
   const [setups, setSetups] = useState<Setup[]>([]);
   const [symbol, setSymbol] = useState('XAUUSD');
   const [direction, setDirection] = useState<'AUTO' | 'BUY' | 'SELL'>('AUTO');
+  const [method, setMethod] = useState<'SMC' | 'SK'>('SMC');
   const [creating, setCreating] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -124,7 +125,7 @@ function SetupsTab() {
   async function create() {
     setCreating(true); setError(''); setNotice('');
     try {
-      const res = await api<any>('/ai/setup', { method: 'POST', body: JSON.stringify({ symbol, direction }) });
+      const res = await api<any>('/ai/setup', { method: 'POST', body: JSON.stringify({ symbol, direction, method }) });
       if (res?.noTrade) {
         setNotice(res.reason);
       } else {
@@ -158,6 +159,11 @@ function SetupsTab() {
             <option value="BUY">Buộc BUY</option>
             <option value="SELL">Buộc SELL</option>
           </select>
+          <select className="input w-auto" value={method} onChange={(e) => setMethod(e.target.value as any)}
+            title="SMC: Order Block/FVG + thanh khoản. SK System: Fibonacci Retracement/Extension (sóng 0-A-B).">
+            <option value="SMC">SMC (Order Block/FVG)</option>
+            <option value="SK">SK System (Fibonacci)</option>
+          </select>
           <button className="btn" onClick={create} disabled={creating}>
             {creating ? '🤖 AI đang phân tích...' : '🎯 Tạo setup mới'}
           </button>
@@ -178,7 +184,7 @@ function SetupsTab() {
           </p>
         )}
         <p className="text-xs text-gray-500 mt-2">
-          Thuật toán SMC (Order Block/FVG + thanh khoản) chốt Entry/SL/TP theo một quy trình cố định, AI chỉ viết lại lý do bằng lời — không tự đổi số. Hệ thống tự theo dõi giá: khớp entry → đang chạy → chạm TP thắng / chạm SL thua. Không đặt lệnh thật.
+          Thuật toán (SMC: Order Block/FVG + thanh khoản, hoặc SK System: Fibonacci Retracement/Extension) chốt Entry/SL/TP theo một quy trình cố định, AI chỉ viết lại lý do bằng lời — không tự đổi số. Hệ thống tự theo dõi giá: khớp entry → đang chạy → chạm TP thắng / chạm SL thua. Không đặt lệnh thật.
         </p>
       </div>
 
@@ -197,6 +203,8 @@ function SetupsTab() {
                 <span className={`text-xs px-2 py-0.5 rounded-full border ${cls}`}>{label}</span>
                 {s.source === 'SMC' && <span className="text-xs text-blue-400">(SMC · AI diễn giải)</span>}
                 {s.source === 'SMC-ALGO' && <span className="text-xs text-gray-500">(SMC · lời giải mẫu)</span>}
+                {s.source === 'SK' && <span className="text-xs text-purple-400">(SK System · AI diễn giải)</span>}
+                {s.source === 'SK-ALGO' && <span className="text-xs text-gray-500">(SK System · lời giải mẫu)</span>}
                 {s.source === 'ALGO' && <span className="text-xs text-gray-500">(thuật toán)</span>}
                 <span className="text-xs text-gray-500 ml-auto">{new Date(s.createdAt).toLocaleString('vi-VN')}</span>
                 {(s.status === 'PENDING' || s.status === 'RUNNING') && (

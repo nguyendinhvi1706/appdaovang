@@ -14,6 +14,9 @@ class CreateSetupDto {
 
   @IsOptional() @IsIn(['AUTO', 'BUY', 'SELL'])
   direction?: 'AUTO' | 'BUY' | 'SELL';
+
+  @IsOptional() @IsIn(['SMC', 'SK'])
+  method?: 'SMC' | 'SK';
 }
 
 @UseGuards(JwtAuthGuard)
@@ -33,7 +36,7 @@ export class AiController {
 
   @Post('setup')
   createSetup(@Request() req: any, @Body() dto: CreateSetupDto) {
-    return this.svc.createSetup(req.user.id, dto.symbol, dto.direction ?? 'AUTO');
+    return this.svc.createSetup(req.user.id, dto.symbol, dto.direction ?? 'AUTO', dto.method ?? 'SMC');
   }
 
   @Get('setups')

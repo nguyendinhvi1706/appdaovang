@@ -2,9 +2,25 @@ import { Injectable, NotFoundException, ServiceUnavailableException } from '@nes
 import { PrismaService } from '../prisma/prisma.service';
 import { MarketService } from '../market/market.service';
 import { atr, Candle, ema, rsi, swingLevels } from './indicators';
-import { detectEqualLevels, detectFVG, detectOrderBlocks, detectStructure, detectSwings, Zone } from '../smc/smc.engine';
+import { detectEqualLevels, detectFVG, detectOrderBlocks, detectStructure, detectSwings, Swing, Zone } from '../smc/smc.engine';
 
 export type ChatMessage = { role: 'user' | 'assistant'; content: string };
+
+/** Tìm sóng 3 điểm gần nhất 0→A→B theo đúng loại điểm B mong muốn (dùng cho SK System: Fibonacci
+ *  Retracement/Extension). B là swing gần hiện tại nhất đúng loại (điểm hồi), A là swing xen kẽ
+ *  ngay trước B (đỉnh/đáy sóng dẫn đường), 0 là swing cùng loại B ngay trước A (điểm bắt đầu sóng). */
+function pickWave(swings: Swing[], wantKind: 'high' | 'low'): { s0: Swing; sA: Swing; sB: Swing } | null {
+  let iB = -1;
+  for (let i = swings.length - 1; i >= 0; i--) { if (swings[i].kind === wantKind) { iB = i; break; } }
+  if (iB < 0) return null;
+  let iA = -1;
+  for (let i = iB - 1; i >= 0; i--) { if (swings[i].kind !== wantKind) { iA = i; break; } }
+  if (iA < 0) return null;
+  let i0 = -1;
+  for (let i = iA - 1; i >= 0; i--) { if (swings[i].kind === wantKind) { i0 = i; break; } }
+  if (i0 < 0) return null;
+  return { s0: swings[i0], sA: swings[iA], sB: swings[iB] };
+}
 
 const SYSTEM_PROMPT = `Bạn là AI Trader — trợ lý phân tích thị trường của AppDaoVang, nói tiếng Việt.
 Nhiệm vụ: phân tích kỹ thuật, nhận định xu hướng, gợi ý vùng SL/TP, tính khối lượng theo rủi ro.
@@ -264,7 +280,12 @@ export class AiService {
 
   // ================= Setup lệnh: entry/SL/TP + theo dõi kết quả =================
 
-  async createSetup(userId: string, symbolRaw: string, wantDirection: 'AUTO' | 'BUY' | 'SELL' = 'AUTO') {
+  async createSetup(
+    userId: string,
+    symbolRaw: string,
+    wantDirection: 'AUTO' | 'BUY' | 'SELL' = 'AUTO',
+    method: 'SMC' | 'SK' = 'SMC',
+  ) {
     const symbol = symbolRaw.toUpperCase();
     const [h1, h1c, spotQ, market] = await Promise.all([
       this.market.candles(symbol, '15m').catch(() => [] as Candle[]),
@@ -292,26 +313,10 @@ export class AiService {
       };
     }
 
-    // Bù basis nếu nến là futures (GC=F) — quy toàn bộ mức giá SMC bên dưới về hệ giá spot
+    // Bù basis nếu nến là futures (GC=F) — quy toàn bộ mức giá SMC/Fibonacci bên dưới về hệ giá spot
     const offM = spot - lastClose;
     const aRef = atr(h1) ?? spot * 0.005;
-
-    // ============ Phương pháp SMC (Smart Money Concept): cấu trúc, Order Block, FVG, thanh khoản ============
-    // Đây là engine đã xây cho Giai đoạn 3 (trang SMC) — giờ tái dùng cho Setup lệnh thay vì chỉ
-    // dựa vào EMA cross. Lý do: EMA20/50 là trung bình cộng dồn nên luôn trễ và dễ cho tín hiệu
-    // "50-50" trong thị trường sideway; SMC bám theo hành động giá thật (nơi giá đảo chiều, nơi
-    // thanh khoản bị quét) nên cho điểm vào/ra cụ thể hơn — dù không có phương pháp nào đảm bảo
-    // thắng chắc, đây là khung phân tích có căn cứ rõ ràng hơn một đường trung bình đơn thuần.
-    // Lọc bỏ vùng quá nhỏ (< 10% ATR) — đây thường chỉ là nhiễu giá chứ không phải dấu vết tổ
-    // chức thật, nếu không lọc sẽ chọn nhầm vùng gần như trùng giá hiện tại, mất ý nghĩa "chờ retest".
-    const minZoneSize = aRef * 0.1;
     const m15Swings = detectSwings(h1);
-    const m15Structure = detectStructure(h1, m15Swings);
-    const shiftZone = (z: Zone) => ({ ...z, top: z.top + offM, bottom: z.bottom + offM });
-    const sizeable = (z: Zone) => z.top - z.bottom >= minZoneSize;
-    const unmitigatedOBs = detectOrderBlocks(h1, m15Structure).filter((z) => !z.mitigated).map(shiftZone).filter(sizeable);
-    const unmitigatedFVGs = detectFVG(h1).filter((z) => !z.mitigated).map(shiftZone).filter(sizeable);
-    const liquidity = detectEqualLevels(h1, m15Swings).map((e) => ({ ...e, price: e.price + offM }));
 
     // Xu hướng H1: ưu tiên BOS/CHOCH gần nhất (phản ứng ngay khi cấu trúc bị phá — không trễ
     // như EMA); chỉ dùng EMA khi H1 chưa có sự kiện cấu trúc nào để dựa vào.
@@ -327,28 +332,12 @@ export class AiService {
     const eventAgeH = lastH1Event ? (Date.now() / 1000 - lastH1Event.time) / 3600 : null;
     const eventAgeText = eventAgeH == null ? '' : eventAgeH < 1.5 ? 'vừa mới' : `cách đây khoảng ${Math.round(eventAgeH)} giờ`;
 
-    const smcText = [
-      'CẤU TRÚC SMC (khung M15, mức giá đã quy về spot):',
-      lastH1Event
-        ? `H1 ${eventAgeText} có tín hiệu ${lastH1Event.type} theo hướng ${lastH1Event.direction === 'bull' ? 'TĂNG' : 'GIẢM'} tại mốc ${(lastH1Event.price + offM).toFixed(2)} (đây là sự kiện phá cấu trúc gần nhất tìm được, không nhất thiết vừa xảy ra).`
-        : 'H1 chưa có phá cấu trúc (BOS/CHOCH) rõ ràng gần đây — dùng EMA làm căn cứ xu hướng tạm thời.',
-      unmitigatedOBs.length
-        ? `Order Block M15 chưa bị lấp (đã lọc bỏ vùng quá nhỏ/nhiễu): ${unmitigatedOBs.slice(-5).map((z) => `${z.direction === 'bull' ? 'Bullish' : 'Bearish'} [${z.bottom.toFixed(2)}-${z.top.toFixed(2)}]`).join(', ')}`
-        : 'Không có Order Block M15 nào còn hiệu lực và đủ lớn để đáng tin cậy.',
-      unmitigatedFVGs.length
-        ? `FVG M15 chưa bị lấp (đã lọc bỏ vùng quá nhỏ/nhiễu): ${unmitigatedFVGs.slice(-5).map((z) => `${z.direction === 'bull' ? 'Bullish' : 'Bearish'} [${z.bottom.toFixed(2)}-${z.top.toFixed(2)}]`).join(', ')}`
-        : 'Không có FVG M15 nào còn hiệu lực và đủ lớn để đáng tin cậy.',
-      liquidity.length
-        ? `Vùng thanh khoản (EQH/EQL) chưa bị quét: ${liquidity.map((e) => `${e.kind} ${e.price.toFixed(2)}`).join(', ')}`
-        : 'Chưa phát hiện vùng thanh khoản EQH/EQL rõ ràng.',
-    ].join('\n');
-
     // ============ Thuật toán quyết định số liệu — MỘT nguồn sự thật duy nhất ============
     // Trước đây để AI tự "nghĩ" cả entry/SL/TP bằng văn xuôi JSON: model yếu hay liệt kê nhiều
     // vùng thanh khoản rồi đổi ý giữa chừng (chain-of-thought rò rỉ vào câu trả lời), dẫn tới lời
     // giải thích không khớp con số hiển thị, và có lúc chọn nhầm TP không phải vùng gần nhất.
-    // Sửa tận gốc: thuật toán tất định chọn Order Block/FVG + vùng thanh khoản, AI chỉ được giao
-    // NHIỆM VỤ DUY NHẤT là viết lại lý do bằng lời cho các con số đã chốt — không được đổi số.
+    // Sửa tận gốc: thuật toán tất định chọn số liệu (SMC hoặc SK System tùy `method`), AI chỉ được
+    // giao NHIỆM VỤ DUY NHẤT là viết lại lý do bằng lời cho các con số đã chốt — không được đổi số.
     if (!h1Trend && wantDirection === 'AUTO') {
       return {
         noTrade: true,
@@ -361,86 +350,192 @@ export class AiService {
     const bull = wantDirection === 'AUTO' ? h1Trend === 'TĂNG' : wantDirection === 'BUY';
     const counterTrend = wantDirection !== 'AUTO' && h1Trend != null &&
       ((wantDirection === 'BUY' && h1Trend === 'GIẢM') || (wantDirection === 'SELL' && h1Trend === 'TĂNG'));
-    const dirMatch = (z: Zone) => (bull ? z.direction === 'bull' : z.direction === 'bear');
-    const zoneDist = (z: Zone) => Math.abs(spot - (bull ? z.top : z.bottom));
-
-    // Ưu tiên Order Block; không có thì xét FVG — cả hai đều lấy vùng GẦN GIÁ NHẤT theo đúng hướng
-    const obCandidates = unmitigatedOBs.filter(dirMatch).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
-    const fvgCandidates = unmitigatedFVGs.filter(dirMatch).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
-    const picked = obCandidates[0] ? { zone: obCandidates[0], kind: 'Order Block' } : fvgCandidates[0] ? { zone: fvgCandidates[0], kind: 'FVG' } : null;
-
-    if (!picked) {
-      const dirLabel = bull ? 'BUY' : 'SELL';
-      return {
-        noTrade: true,
-        reason: wantDirection === 'AUTO'
-          ? `Xu hướng H1 là ${h1Trend} nhưng chưa có Order Block/FVG M15 nào (chưa bị lấp) đủ gần giá theo đúng hướng — chưa đủ điều kiện SMC để vào lệnh, đứng ngoài chờ giá tạo vùng mới.`
-          : `Bạn chọn ${dirLabel} nhưng chưa có Order Block/FVG M15 nào (chưa bị lấp) đủ gần giá theo hướng ${dirLabel} — chưa đủ điều kiện SMC để vào lệnh theo hướng này, đứng ngoài chờ giá tạo vùng mới.`,
-      };
-    }
-    const { zone, kind } = picked;
-    const entry = bull ? zone.top : zone.bottom; // chờ giá retest về rìa vùng gần nhất
-    const buffer = aRef * 0.15;
-    const sl = bull ? zone.bottom - buffer : zone.top + buffer; // SL ngoài vùng
-    const slDist = Math.abs(entry - sl);
-
-    // Quy trình chọn TP CỐ ĐỊNH: trong các vùng thanh khoản đúng hướng, lấy vùng GẦN NHẤT đạt RR
-    // tối thiểu 1:1 (không phải vùng gần nhất tuyệt đối, vì có thể quá gần để đáng vào lệnh); nếu
-    // không vùng nào đạt, dùng RR 1:2 mặc định. Giới hạn RR tối đa 1:5 để tránh mục tiêu viển vông.
-    const minRR = 1;
-    const maxRR = 5;
-    const liqInDirection = liquidity
-      .filter((e) => (bull ? e.price > entry : e.price < entry))
-      .map((e) => ({ ...e, dist: Math.abs(e.price - entry) }))
-      .sort((a, b) => a.dist - b.dist);
-    const qualifying = liqInDirection.find((e) => e.dist / slDist >= minRR);
-
-    let tp: number;
-    let tpNote: string;
-    if (qualifying && qualifying.dist / slDist <= maxRR) {
-      tp = qualifying.price;
-      tpNote = `vùng thanh khoản ${qualifying.kind} ${qualifying.price.toFixed(2)} — điểm hút thanh khoản gần nhất theo hướng ${bull ? 'tăng' : 'giảm'}, đạt RR tối thiểu 1:${minRR}`;
-    } else {
-      tp = bull ? entry + slDist * 2 : entry - slDist * 2;
-      tpNote = liqInDirection.length
-        ? `RR 1:2 mặc định (vùng thanh khoản gần nhất ${liqInDirection[0].price.toFixed(2)} không đạt RR hợp lý trong khoảng 1:${minRR}-1:${maxRR})`
-        : 'RR 1:2 mặc định (chưa phát hiện vùng thanh khoản phù hợp theo hướng này)';
-    }
-    const rr = +(Math.abs(tp - entry) / slDist).toFixed(2);
     const direction: 'BUY' | 'SELL' = bull ? 'BUY' : 'SELL';
-
-    // Lời giải thích mẫu — LUÔN khớp 100% với số liệu vì dùng chính các biến đã tính ở trên
     const trendClause = h1Trend
       ? (lastH1Event ? `${eventAgeText} có ${lastH1Event.type} xác nhận xu hướng ${h1Trend.toLowerCase()}` : `theo EMA đang ${h1Trend.toLowerCase()}`)
       : 'chưa xác định rõ ràng (thiếu cả cấu trúc BOS/CHOCH lẫn EMA), thực hiện theo hướng bạn tự chọn';
     const warnClause = counterTrend
       ? ` ⚠️ Đây là lệnh NGƯỢC xu hướng H1 hiện tại (đang ${h1Trend?.toLowerCase()}) theo lựa chọn thủ công của bạn — rủi ro cao hơn lệnh thuận xu hướng, chỉ nên vào khi có tín hiệu đảo chiều mạnh và quản lý vốn chặt chẽ.`
       : '';
-    const templateReason =
-      `Cấu trúc H1 ${trendClause}. ` +
-      `Xuất hiện ${bull ? 'Bullish' : 'Bearish'} ${kind} tại vùng ${zone.bottom.toFixed(2)}-${zone.top.toFixed(2)}, gần giá hiện tại. Chờ giá hồi vào vùng này để vào ${direction} tại ${entry.toFixed(2)}. ` +
-      `Stop Loss đặt ${bull ? 'dưới' : 'trên'} vùng ${kind} tại ${sl.toFixed(2)} nhằm tránh nhiễu. ` +
-      `Take Profit đặt tại ${tpNote}, đạt tỷ lệ Risk:Reward 1:${rr}.` + warnClause;
+
+    let entry: number, sl: number, tp: number, rr: number;
+    let templateReason: string, aiSystemMsg: string, aiUserMsg: string, sourceTag: string;
+
+    if (method === 'SK') {
+      // ============ SK System: Fibonacci Retracement + Extension (sóng 3 điểm 0→A→B) ============
+      // Kỹ thuật kinh điển: xác nhận xu hướng bằng sóng dẫn đường 0→A, chờ giá hồi về vùng "tỉ lệ
+      // vàng" Fibonacci Retracement 0.5-0.667 của sóng đó để vào lệnh, SL sau mốc 0.786, TP đo bằng
+      // Fibonacci Extension chiếu từ điểm hồi B. Toàn bộ số liệu tính từ swing thật trên M15 — AI
+      // không được tự chọn điểm sóng hay số liệu, chỉ diễn giải.
+      const wantKind: 'high' | 'low' = bull ? 'low' : 'high';
+      const wave = pickWave(m15Swings, wantKind);
+      const validWave = wave && (bull ? wave.sB.price > wave.s0.price : wave.sB.price < wave.s0.price);
+      if (!validWave) {
+        return {
+          noTrade: true,
+          reason: `Chưa tìm được sóng ${bull ? 'tăng' : 'giảm'} 3 điểm (0→A→B) hợp lệ theo cấu trúc SK System trên M15 (cần ${bull ? 'đáy sau cao hơn đáy trước' : 'đỉnh sau thấp hơn đỉnh trước'}) — đứng ngoài chờ sóng mới hình thành.`,
+        };
+      }
+      const s0P = wave!.s0.price + offM, sAP = wave!.sA.price + offM, sBP = wave!.sB.price + offM;
+      const range = Math.abs(sAP - s0P);
+      const fibLevel = (r: number) => (bull ? sAP - r * range : sAP + r * range);
+      entry = fibLevel(0.618); // điểm "tỉ lệ vàng" giữa vùng 0.5-0.667
+      const slFib = fibLevel(0.786);
+      const buffer = aRef * 0.15;
+      sl = bull ? slFib - buffer : slFib + buffer;
+      const slDist = Math.abs(entry - sl);
+
+      // Chọn tỉ lệ Extension nhỏ nhất đạt RR tối thiểu 1:1 (giống logic chọn TP của SMC) thay vì
+      // luôn lấy tỉ lệ lớn nhất — tránh mục tiêu viển vông không có căn cứ.
+      const ratios = [1.272, 1.382, 1.618, 1.809, 2];
+      let usedRatio = 1.618;
+      tp = bull ? sBP + usedRatio * range : sBP - usedRatio * range;
+      for (const r of ratios) {
+        const cand = bull ? sBP + r * range : sBP - r * range;
+        if (Math.abs(cand - entry) / slDist >= 1) { tp = cand; usedRatio = r; break; }
+      }
+      rr = +(Math.abs(tp - entry) / slDist).toFixed(2);
+
+      // Nếu giá đã vượt qua SL hoặc đã tới TP dự kiến trước khi kịp tạo setup → sóng đã vô hiệu
+      const invalidated = bull ? (spot <= sl || spot >= tp) : (spot >= sl || spot <= tp);
+      if (invalidated) {
+        return {
+          noTrade: true,
+          reason: 'Sóng Fibonacci vừa xác định đã bị vô hiệu — giá đã vượt qua vùng Stop Loss hoặc đã đạt vùng Take Profit dự kiến trước khi kịp tạo setup. Đứng ngoài chờ sóng mới.',
+        };
+      }
+
+      const skText = [
+        'CẤU TRÚC SK SYSTEM (Fibonacci Retracement/Extension, khung M15, mức giá đã quy về spot):',
+        lastH1Event
+          ? `H1 ${eventAgeText} có tín hiệu ${lastH1Event.type} theo hướng ${lastH1Event.direction === 'bull' ? 'TĂNG' : 'GIẢM'} tại mốc ${(lastH1Event.price + offM).toFixed(2)}.`
+          : 'H1 chưa có phá cấu trúc (BOS/CHOCH) rõ ràng gần đây — dùng EMA làm căn cứ xu hướng tạm thời.',
+        `Sóng dẫn đường 0→A: từ ${s0P.toFixed(2)} đến ${sAP.toFixed(2)}. Điểm B (điểm hồi gần nhất): ${sBP.toFixed(2)} — ${bull ? 'cao hơn' : 'thấp hơn'} điểm 0, xác nhận cấu trúc ${bull ? 'tăng' : 'giảm'} còn hiệu lực.`,
+        `Vùng vào lệnh (Fibonacci Retracement 0.5-0.667 của sóng 0-A): ${fibLevel(0.5).toFixed(2)} - ${fibLevel(0.667).toFixed(2)}.`,
+      ].join('\n');
+
+      templateReason =
+        `Cấu trúc H1 ${trendClause}. ` +
+        `Trên M15 xác định sóng ${bull ? 'tăng' : 'giảm'} 3 điểm theo SK System: điểm 0 tại ${s0P.toFixed(2)}, điểm A tại ${sAP.toFixed(2)}, điểm B (hồi gần nhất) tại ${sBP.toFixed(2)} — ${bull ? 'đáy sau cao hơn đáy trước' : 'đỉnh sau thấp hơn đỉnh trước'}, xác nhận cấu trúc ${bull ? 'tăng' : 'giảm'} còn hiệu lực. ` +
+        `Chờ giá hồi về vùng Fibonacci Retracement 0.5-0.667 (điểm vào ${entry.toFixed(2)}) để vào ${direction}. ` +
+        `Stop Loss đặt sau mốc Fibonacci 0.786 tại ${sl.toFixed(2)}. ` +
+        `Take Profit đặt tại mốc Fibonacci Extension ${usedRatio} chiếu từ điểm B (${tp.toFixed(2)}), đạt tỷ lệ Risk:Reward 1:${rr}.` + warnClause;
+
+      aiSystemMsg =
+        'Bạn là chuyên gia phân tích Fibonacci Retracement/Extension (SK System) viết tiếng Việt. Nhiệm vụ DUY NHẤT: diễn giải lại một quyết định giao dịch ĐÃ CÓ SẴN ' +
+        'thành 2-3 câu văn mạch lạc. TUYỆT ĐỐI không đề xuất số liệu khác, không liệt kê nhiều phương án, không đổi entry/SL/TP đã cho.';
+      aiUserMsg =
+        `${skText}\n\n` +
+        `Setup đã được thuật toán SK System (Fibonacci) chốt từ dữ liệu trên — các con số dưới đây là CUỐI CÙNG, không được đổi:\n` +
+        `- Hướng: ${direction}\n- Entry: ${entry.toFixed(2)} (Fibonacci Retracement 0.618 của sóng 0-A)\n` +
+        `- Stop Loss: ${sl.toFixed(2)} (sau mốc Fibonacci 0.786)\n- Take Profit: ${tp.toFixed(2)} (Fibonacci Extension ${usedRatio} chiếu từ điểm B)\n- RR: 1:${rr}\n` +
+        `- Xu hướng H1: ${h1Trend ?? 'chưa xác định rõ'}${lastH1Event ? ` (${eventAgeText} có ${lastH1Event.type})` : ' (theo EMA, H1 chưa có phá cấu trúc)'}\n` +
+        (counterTrend ? `- LƯU Ý BẮT BUỘC: đây là lệnh NGƯỢC xu hướng H1 do người dùng tự chọn hướng — PHẢI nêu rõ trong câu giải thích rằng đây là lệnh ngược xu hướng, rủi ro cao hơn.\n` : '') +
+        `\nViết 2-3 câu tiếng Việt giải thích NGẮN GỌN vì sao chọn đúng các con số này. Không liệt kê phương án khác, không đổi số.`;
+      sourceTag = 'SK';
+    } else {
+      // ============ Phương pháp SMC (Smart Money Concept): cấu trúc, Order Block, FVG, thanh khoản ============
+      // Đây là engine đã xây cho Giai đoạn 3 (trang SMC) — giờ tái dùng cho Setup lệnh thay vì chỉ
+      // dựa vào EMA cross. Lý do: EMA20/50 là trung bình cộng dồn nên luôn trễ và dễ cho tín hiệu
+      // "50-50" trong thị trường sideway; SMC bám theo hành động giá thật (nơi giá đảo chiều, nơi
+      // thanh khoản bị quét) nên cho điểm vào/ra cụ thể hơn — dù không có phương pháp nào đảm bảo
+      // thắng chắc, đây là khung phân tích có căn cứ rõ ràng hơn một đường trung bình đơn thuần.
+      // Lọc bỏ vùng quá nhỏ (< 10% ATR) — đây thường chỉ là nhiễu giá chứ không phải dấu vết tổ
+      // chức thật, nếu không lọc sẽ chọn nhầm vùng gần như trùng giá hiện tại, mất ý nghĩa "chờ retest".
+      const minZoneSize = aRef * 0.1;
+      const m15Structure = detectStructure(h1, m15Swings);
+      const shiftZone = (z: Zone) => ({ ...z, top: z.top + offM, bottom: z.bottom + offM });
+      const sizeable = (z: Zone) => z.top - z.bottom >= minZoneSize;
+      const unmitigatedOBs = detectOrderBlocks(h1, m15Structure).filter((z) => !z.mitigated).map(shiftZone).filter(sizeable);
+      const unmitigatedFVGs = detectFVG(h1).filter((z) => !z.mitigated).map(shiftZone).filter(sizeable);
+      const liquidity = detectEqualLevels(h1, m15Swings).map((e) => ({ ...e, price: e.price + offM }));
+
+      const smcText = [
+        'CẤU TRÚC SMC (khung M15, mức giá đã quy về spot):',
+        lastH1Event
+          ? `H1 ${eventAgeText} có tín hiệu ${lastH1Event.type} theo hướng ${lastH1Event.direction === 'bull' ? 'TĂNG' : 'GIẢM'} tại mốc ${(lastH1Event.price + offM).toFixed(2)} (đây là sự kiện phá cấu trúc gần nhất tìm được, không nhất thiết vừa xảy ra).`
+          : 'H1 chưa có phá cấu trúc (BOS/CHOCH) rõ ràng gần đây — dùng EMA làm căn cứ xu hướng tạm thời.',
+        unmitigatedOBs.length
+          ? `Order Block M15 chưa bị lấp (đã lọc bỏ vùng quá nhỏ/nhiễu): ${unmitigatedOBs.slice(-5).map((z) => `${z.direction === 'bull' ? 'Bullish' : 'Bearish'} [${z.bottom.toFixed(2)}-${z.top.toFixed(2)}]`).join(', ')}`
+          : 'Không có Order Block M15 nào còn hiệu lực và đủ lớn để đáng tin cậy.',
+        unmitigatedFVGs.length
+          ? `FVG M15 chưa bị lấp (đã lọc bỏ vùng quá nhỏ/nhiễu): ${unmitigatedFVGs.slice(-5).map((z) => `${z.direction === 'bull' ? 'Bullish' : 'Bearish'} [${z.bottom.toFixed(2)}-${z.top.toFixed(2)}]`).join(', ')}`
+          : 'Không có FVG M15 nào còn hiệu lực và đủ lớn để đáng tin cậy.',
+        liquidity.length
+          ? `Vùng thanh khoản (EQH/EQL) chưa bị quét: ${liquidity.map((e) => `${e.kind} ${e.price.toFixed(2)}`).join(', ')}`
+          : 'Chưa phát hiện vùng thanh khoản EQH/EQL rõ ràng.',
+      ].join('\n');
+
+      const dirMatch = (z: Zone) => (bull ? z.direction === 'bull' : z.direction === 'bear');
+      const zoneDist = (z: Zone) => Math.abs(spot - (bull ? z.top : z.bottom));
+
+      // Ưu tiên Order Block; không có thì xét FVG — cả hai đều lấy vùng GẦN GIÁ NHẤT theo đúng hướng
+      const obCandidates = unmitigatedOBs.filter(dirMatch).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
+      const fvgCandidates = unmitigatedFVGs.filter(dirMatch).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
+      const picked = obCandidates[0] ? { zone: obCandidates[0], kind: 'Order Block' } : fvgCandidates[0] ? { zone: fvgCandidates[0], kind: 'FVG' } : null;
+
+      if (!picked) {
+        const dirLabel = bull ? 'BUY' : 'SELL';
+        return {
+          noTrade: true,
+          reason: wantDirection === 'AUTO'
+            ? `Xu hướng H1 là ${h1Trend} nhưng chưa có Order Block/FVG M15 nào (chưa bị lấp) đủ gần giá theo đúng hướng — chưa đủ điều kiện SMC để vào lệnh, đứng ngoài chờ giá tạo vùng mới.`
+            : `Bạn chọn ${dirLabel} nhưng chưa có Order Block/FVG M15 nào (chưa bị lấp) đủ gần giá theo hướng ${dirLabel} — chưa đủ điều kiện SMC để vào lệnh theo hướng này, đứng ngoài chờ giá tạo vùng mới.`,
+        };
+      }
+      const { zone, kind } = picked;
+      entry = bull ? zone.top : zone.bottom; // chờ giá retest về rìa vùng gần nhất
+      const buffer = aRef * 0.15;
+      sl = bull ? zone.bottom - buffer : zone.top + buffer; // SL ngoài vùng
+      const slDist = Math.abs(entry - sl);
+
+      // Quy trình chọn TP CỐ ĐỊNH: trong các vùng thanh khoản đúng hướng, lấy vùng GẦN NHẤT đạt RR
+      // tối thiểu 1:1 (không phải vùng gần nhất tuyệt đối, vì có thể quá gần để đáng vào lệnh); nếu
+      // không vùng nào đạt, dùng RR 1:2 mặc định. Giới hạn RR tối đa 1:5 để tránh mục tiêu viển vông.
+      const minRR = 1;
+      const maxRR = 5;
+      const liqInDirection = liquidity
+        .filter((e) => (bull ? e.price > entry : e.price < entry))
+        .map((e) => ({ ...e, dist: Math.abs(e.price - entry) }))
+        .sort((a, b) => a.dist - b.dist);
+      const qualifying = liqInDirection.find((e) => e.dist / slDist >= minRR);
+
+      let tpNote: string;
+      if (qualifying && qualifying.dist / slDist <= maxRR) {
+        tp = qualifying.price;
+        tpNote = `vùng thanh khoản ${qualifying.kind} ${qualifying.price.toFixed(2)} — điểm hút thanh khoản gần nhất theo hướng ${bull ? 'tăng' : 'giảm'}, đạt RR tối thiểu 1:${minRR}`;
+      } else {
+        tp = bull ? entry + slDist * 2 : entry - slDist * 2;
+        tpNote = liqInDirection.length
+          ? `RR 1:2 mặc định (vùng thanh khoản gần nhất ${liqInDirection[0].price.toFixed(2)} không đạt RR hợp lý trong khoảng 1:${minRR}-1:${maxRR})`
+          : 'RR 1:2 mặc định (chưa phát hiện vùng thanh khoản phù hợp theo hướng này)';
+      }
+      rr = +(Math.abs(tp - entry) / slDist).toFixed(2);
+
+      templateReason =
+        `Cấu trúc H1 ${trendClause}. ` +
+        `Xuất hiện ${bull ? 'Bullish' : 'Bearish'} ${kind} tại vùng ${zone.bottom.toFixed(2)}-${zone.top.toFixed(2)}, gần giá hiện tại. Chờ giá hồi vào vùng này để vào ${direction} tại ${entry.toFixed(2)}. ` +
+        `Stop Loss đặt ${bull ? 'dưới' : 'trên'} vùng ${kind} tại ${sl.toFixed(2)} nhằm tránh nhiễu. ` +
+        `Take Profit đặt tại ${tpNote}, đạt tỷ lệ Risk:Reward 1:${rr}.` + warnClause;
+
+      aiSystemMsg =
+        'Bạn là chuyên gia Smart Money Concept (SMC/ICT) viết tiếng Việt. Nhiệm vụ DUY NHẤT: diễn giải lại một quyết định giao dịch ĐÃ CÓ SẴN ' +
+        'thành 2-3 câu văn mạch lạc. TUYỆT ĐỐI không đề xuất số liệu khác, không liệt kê nhiều phương án, không đổi entry/SL/TP đã cho.';
+      aiUserMsg =
+        `${smcText}\n\n` +
+        `Setup đã được thuật toán SMC chốt từ dữ liệu trên — các con số dưới đây là CUỐI CÙNG, không được đổi:\n` +
+        `- Hướng: ${direction}\n- Entry: ${entry.toFixed(2)} (rìa ${bull ? 'Bullish' : 'Bearish'} ${kind} [${zone.bottom.toFixed(2)}-${zone.top.toFixed(2)}])\n` +
+        `- Stop Loss: ${sl.toFixed(2)}\n- Take Profit: ${tp.toFixed(2)} (${tpNote})\n- RR: 1:${rr}\n` +
+        `- Xu hướng H1: ${h1Trend ?? 'chưa xác định rõ'}${lastH1Event ? ` (${eventAgeText} có ${lastH1Event.type} — dùng đúng cụm từ về thời gian này, KHÔNG tự đổi thành "vừa" nếu không phải vừa xảy ra)` : ' (theo EMA, H1 chưa có phá cấu trúc)'}\n` +
+        (counterTrend ? `- LƯU Ý BẮT BUỘC: đây là lệnh NGƯỢC xu hướng H1 do người dùng tự chọn hướng — PHẢI nêu rõ trong câu giải thích rằng đây là lệnh ngược xu hướng, rủi ro cao hơn.\n` : '') +
+        `\nViết 2-3 câu tiếng Việt giải thích NGẮN GỌN vì sao chọn đúng các con số này. Không liệt kê phương án khác, không đổi số.`;
+      sourceTag = 'SMC';
+    }
 
     // AI chỉ được giao viết lại lời giải cho số liệu ĐÃ CHỐT — không được tạo hay đổi số mới
     const aiReason = await this.callLlm([
-      {
-        role: 'system',
-        content:
-          'Bạn là chuyên gia Smart Money Concept (SMC/ICT) viết tiếng Việt. Nhiệm vụ DUY NHẤT: diễn giải lại một quyết định giao dịch ĐÃ CÓ SẴN ' +
-          'thành 2-3 câu văn mạch lạc. TUYỆT ĐỐI không đề xuất số liệu khác, không liệt kê nhiều phương án, không đổi entry/SL/TP đã cho.',
-      },
-      {
-        role: 'user',
-        content:
-          `${smcText}\n\n` +
-          `Setup đã được thuật toán SMC chốt từ dữ liệu trên — các con số dưới đây là CUỐI CÙNG, không được đổi:\n` +
-          `- Hướng: ${direction}\n- Entry: ${entry.toFixed(2)} (rìa ${bull ? 'Bullish' : 'Bearish'} ${kind} [${zone.bottom.toFixed(2)}-${zone.top.toFixed(2)}])\n` +
-          `- Stop Loss: ${sl.toFixed(2)}\n- Take Profit: ${tp.toFixed(2)} (${tpNote})\n- RR: 1:${rr}\n` +
-          `- Xu hướng H1: ${h1Trend ?? 'chưa xác định rõ'}${lastH1Event ? ` (${eventAgeText} có ${lastH1Event.type} — dùng đúng cụm từ về thời gian này, KHÔNG tự đổi thành "vừa" nếu không phải vừa xảy ra)` : ' (theo EMA, H1 chưa có phá cấu trúc)'}\n` +
-          (counterTrend ? `- LƯU Ý BẮT BUỘC: đây là lệnh NGƯỢC xu hướng H1 do người dùng tự chọn hướng — PHẢI nêu rõ trong câu giải thích rằng đây là lệnh ngược xu hướng, rủi ro cao hơn.\n` : '') +
-          `\nViết 2-3 câu tiếng Việt giải thích NGẮN GỌN vì sao chọn đúng các con số này. Không liệt kê phương án khác, không đổi số.`,
-      },
+      { role: 'system', content: aiSystemMsg },
+      { role: 'user', content: aiUserMsg },
     ], 0.2);
 
     const finalReasoning = (aiReason?.trim() || templateReason).slice(0, 1500);
@@ -449,7 +544,7 @@ export class AiService {
         userId, symbol, direction,
         entry: +entry.toFixed(4), sl: +sl.toFixed(4), tp: +tp.toFixed(4), rr,
         reasoning: `[Xu hướng H1: ${h1Trend ?? 'chưa xác định'} | nến lệch spot ${divergePct.toFixed(2)}%${counterTrend ? ' | ⚠️ NGƯỢC XU HƯỚNG (chọn thủ công)' : ''}] ${finalReasoning}`.slice(0, 2000),
-        source: aiReason ? 'SMC' : 'SMC-ALGO',
+        source: aiReason ? sourceTag : `${sourceTag}-ALGO`,
       },
     });
   }
