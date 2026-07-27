@@ -38,6 +38,10 @@ Nguyên tắc:
 @Injectable()
 export class AiService implements OnModuleInit {
   private readonly logger = new Logger(AiService.name);
+  /** Giá spot thật (Swissquote) lấy mẫu lượt quét gần nhất theo symbol — dùng làm điểm neo khi
+   *  nguồn nến lịch sử đang là futures (GC=F) không đáng tin, để ghép 2 điểm liên tiếp thành
+   *  1 khoảng giá đã đi qua giữa 2 lượt quét thay vì phải tin OHLC futures lệch basis. */
+  private lastSpotBySymbol = new Map<string, number>();
 
   constructor(private prisma: PrismaService, private market: MarketService, private telegram: TelegramService) {}
 
@@ -640,11 +644,25 @@ export class AiService implements OnModuleInit {
         let cs = data;
         if (MarketService.isFuturesTicker(ticker)) {
           // Nguồn là hợp đồng tương lai (GC=F/SI=F) chứ không phải giá spot thật — basis với spot
-          // trôi theo thời gian (không cố định), nên bù lệch đơn giản kiểu "dịch đều cả chuỗi nến
-          // theo lệch hiện tại" có thể sai vài đô so với giá spot thật ở từng thời điểm trong quá
-          // khứ — đủ để báo nhầm khớp entry/SL/TP (đã xảy ra thực tế). An toàn hơn: bỏ qua lượt
-          // kiểm tra này, giữ nguyên trạng thái, thử lại khi nguồn spot thật sẵn sàng.
-          cs = [];
+          // trôi theo thời gian nên KHÔNG dùng OHLC lịch sử futures để dò khớp entry/SL/TP (đã báo
+          // sai WIN thực tế). Thay vào đó lấy giá spot thật tức thời (Swissquote — luôn tươi, xác
+          // minh riêng, không phụ thuộc Yahoo) tại mỗi lượt quét (~90s/lần), ghép với giá lấy ở lượt
+          // quét TRƯỚC thành 1 "nến tổng hợp" [thấp nhất, cao nhất] để không bỏ sót biến động giữa
+          // 2 lượt quét — vẫn dò được khớp entry/SL/TP chính xác mà không cần tin dữ liệu futures.
+          const q = await this.market.quote(s.symbol).catch(() => null);
+          const prev = this.lastSpotBySymbol.get(s.symbol);
+          if (q?.price != null) {
+            cs = prev != null
+              ? [{
+                  time: Math.floor(Date.now() / 1000),
+                  open: prev, close: q.price,
+                  high: Math.max(prev, q.price), low: Math.min(prev, q.price),
+                }]
+              : [];
+            this.lastSpotBySymbol.set(s.symbol, q.price);
+          } else {
+            cs = [];
+          }
         } else {
           // Nguồn spot thật — chỉ bù lệch nhỏ, ổn định giữa Yahoo XAUUSD=X và Swissquote (2 nhà
           // cung cấp giá spot khác nhau), không phải bù basis futures.
