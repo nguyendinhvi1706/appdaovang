@@ -352,6 +352,12 @@ export class AiService implements OnModuleInit {
     method: 'SMC' | 'SK' = 'SMC',
   ) {
     const symbol = symbolRaw.toUpperCase();
+    // Ghi chú quan trọng: Yahoo Finance đã bỏ ticker "XAUUSD=X" (trả 404 thẳng, không phải trễ) nên
+    // nến M15/H1 của vàng LUÔN rơi về futures GC=F. Không thể coi đây là lỗi tạm thời để chờ — phải
+    // chấp nhận GC=F (đã bù basis bằng offM bên dưới) làm nguồn cho việc TẠO setup (rủi ro sai lệch
+    // nhỏ trong cửa sổ phân tích ngắn hạn, đã có divergePct chặn khi lệch quá 0.5%). Việc THEO DÕI
+    // setup đã tạo (checkOpenSetups) thì KHÔNG dùng futures nữa — dùng giá spot thật Swissquote real-
+    // time — vì đó mới là chỗ đã từng báo sai WIN do basis trôi theo thời gian trong cả cửa sổ dài.
     const [h1Res, h1c, spotQ, market] = await Promise.all([
       this.market.candlesWithSource(symbol, '15m').catch(() => ({ data: [] as Candle[], ticker: null as string | null })),
       this.market.candles(symbol, '1h').catch(() => [] as Candle[]),
@@ -362,16 +368,6 @@ export class AiService implements OnModuleInit {
     const spot = spotQ?.price ?? market.price;
     if (spot == null || h1.length < 60) {
       throw new ServiceUnavailableException(`Không đủ dữ liệu thị trường cho ${symbol}.`);
-    }
-    if (MarketService.isFuturesTicker(h1Res.ticker)) {
-      // Nến M15 đang rơi về hợp đồng tương lai (GC=F/SI=F) thay vì giá spot thật (XAUUSD=X) — basis
-      // trôi theo thời gian nên không thể bù đơn giản mà tin tưởng được entry/SL/TP tính ra. Từ chối
-      // tạo setup thay vì tự tin báo sai (đã xảy ra thực tế: setup báo "Thắng" trong khi giá spot
-      // thật chưa từng chạm TP).
-      return {
-        noTrade: true,
-        reason: `Nguồn nến M15 hiện là hợp đồng tương lai (${h1Res.ticker}) thay vì giá spot thật — không đủ tin cậy để tính entry/SL/TP. Thử lại sau vài phút khi nguồn spot (XAUUSD=X) sẵn sàng trở lại.`,
-      };
     }
 
     // EMA H1 — chỉ dùng làm dự phòng khi H1 chưa đủ dữ liệu để xác định cấu trúc (BOS/CHOCH)
@@ -389,8 +385,8 @@ export class AiService implements OnModuleInit {
       };
     }
 
-    // Futures (GC=F) đã bị chặn ở trên — offM ở đây chỉ còn bù lệch nhỏ, ổn định giữa 2 nguồn spot
-    // (Yahoo XAUUSD=X vs Swissquote), không phải bù basis futures trôi theo thời gian
+    // Bù basis nếu nến là futures (GC=F, trường hợp thường trực vì XAUUSD=X đã 404 trên Yahoo) —
+    // quy toàn bộ mức giá SMC/Fibonacci bên dưới về hệ giá spot thật tại thời điểm hiện tại
     const offM = spot - lastClose;
     const aRef = atr(h1) ?? spot * 0.005;
     const m15Swings = detectSwings(h1);
