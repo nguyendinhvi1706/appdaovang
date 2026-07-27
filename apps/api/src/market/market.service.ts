@@ -170,6 +170,52 @@ export class MarketService {
     return !!ticker && /=F$/.test(ticker);
   }
 
+  /** Chẩn đoán: gọi trực tiếp từng ticker ứng viên (VD XAUUSD=X, GC=F) và trả về tình trạng riêng
+   *  của từng nguồn (HTTP status, lỗi, số nến, độ trễ nến cuối) — dùng để tìm hiểu tại sao một
+   *  nguồn (VD giá spot thật XAUUSD=X) luôn thất bại thay vì chỉ thấy kết quả đã chọn cuối cùng. */
+  async diagnoseCandles(symbol: string, interval: '5m' | '15m' | '30m' | '1h' | '4h' | '1d' = '15m') {
+    const ranges: Record<string, string> = { '5m': '5d', '15m': '5d', '30m': '1mo', '1h': '1mo', '4h': '3mo', '1d': '6mo' };
+    const yInterval = interval === '4h' ? '1h' : interval;
+    const clean = symbol.replace('=X', '').toUpperCase();
+    const candidates: string[] =
+      clean === 'XAUUSD' ? ['XAUUSD=X', 'GC=F']
+      : clean === 'XAGUSD' ? ['XAGUSD=X', 'SI=F']
+      : /^[A-Z]{6}$/.test(clean) ? [`${clean}=X`]
+      : [symbol];
+
+    const results: any[] = [];
+    for (const y of candidates) {
+      for (const host of ['query1', 'query2']) {
+        const url = `https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(y)}?interval=${yInterval}&range=${ranges[interval]}`;
+        try {
+          const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
+          if (!res.ok) {
+            results.push({ ticker: y, host, httpStatus: res.status, ok: false, error: `HTTP ${res.status}` });
+            continue;
+          }
+          const json: any = await res.json();
+          const r = json?.chart?.result?.[0];
+          const q = r?.indicators?.quote?.[0];
+          if (!r?.timestamp || !q) {
+            results.push({ ticker: y, host, httpStatus: res.status, ok: false, error: JSON.stringify(json?.chart?.error ?? 'no data').slice(0, 200) });
+            continue;
+          }
+          const lastTs = r.timestamp[r.timestamp.length - 1];
+          results.push({
+            ticker: y, host, httpStatus: res.status, ok: true,
+            candleCount: r.timestamp.length,
+            lastCandleTime: lastTs,
+            lastCandleAgeMin: Math.round((Date.now() / 1000 - lastTs) / 60),
+            lastClose: q.close?.[q.close.length - 1] ?? null,
+          });
+        } catch (e: any) {
+          results.push({ ticker: y, host, ok: false, error: e.message });
+        }
+      }
+    }
+    return { symbol, interval, results };
+  }
+
   gold() {
     return this.quote('XAUUSD');
   }
