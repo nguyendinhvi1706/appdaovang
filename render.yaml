@@ -27,3 +27,5 @@ services:
       - key: TWELVEDATA_API_KEY
         sync: false # tùy chọn nhưng khuyến nghị — API key free tại twelvedata.com (chỉ cần email),
         # dùng lấy nến giá spot thật (thay Yahoo XAUUSD=X đã ngừng hoạt động). Để trống sẽ tự rơi về GC=F.
+      - key: CRON_SECRET
+        generateValue: true # dùng làm ?token= khi trỏ UptimeRobot vào /api/cron/scan (xem DEPLOY.md)

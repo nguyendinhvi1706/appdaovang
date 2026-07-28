@@ -69,7 +69,7 @@ export class AiService implements OnModuleInit {
   /** Tự tạo setup (AUTO direction, cả 2 phương pháp SMC + SK) cho mọi user đã kết nối Telegram —
    *  theo watchlist của họ (rơi về XAUUSD nếu watchlist trống). Bỏ qua symbol/phương pháp nào đã
    *  có setup PENDING/RUNNING để tránh spam trùng lặp; noTrade thì im lặng bỏ qua, không báo. */
-  private async autoGenerateSetups() {
+  async autoGenerateSetups() {
     const users = await this.prisma.user.findMany({
       where: { telegramChatId: { not: null } },
       select: { id: true },
@@ -97,9 +97,11 @@ export class AiService implements OnModuleInit {
         }
       }
     }
+    const summary = { users: users.length, created, noTrade, skippedOpen, errored };
     this.logger.log(
       `Auto-scan: ${users.length} user đã nối Telegram | tạo mới: ${created} | đứng ngoài (chưa đủ điều kiện): ${noTrade} | bỏ qua (đã có lệnh mở): ${skippedOpen} | lỗi: ${errored}`,
     );
+    return summary;
   }
 
   private detectSymbol(text: string): string {

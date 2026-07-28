@@ -77,6 +77,19 @@ Yahoo Finance đã gỡ bỏ ticker giá spot vàng (`XAUUSD=X`, lỗi 404 vĩnh
 
 Không cấu hình vẫn hoạt động bình thường (tự rơi về GC=F), đây chỉ là bước nâng cao độ chính xác. Việc theo dõi thắng/thua của setup đã tạo không dùng Twelve Data (dùng giá spot Swissquote không giới hạn), nên gói miễn phí (800 request/ngày) vẫn đủ dùng thoải mái chỉ cho việc tạo setup mới.
 
+## Bước 8 — UptimeRobot chủ động quét + báo Telegram (khuyến nghị)
+
+Vòng lặp quét nền bên trong server (mỗi 90 giây kiểm tra kết quả, mỗi 15 phút tìm setup mới) chỉ chạy trong lúc server đang thức — Render free tier tự "ngủ" sau 15 phút không có truy cập, và mỗi lần thức dậy lại vòng lặp phải tính lại từ đầu. Để chủ động, đáng tin cậy hơn (không phụ thuộc lịch ngủ/thức), trỏ UptimeRobot thẳng vào endpoint quét thay vì chỉ ping giữ máy thức:
+
+1. Vào Render → service API → **Environment** → tìm biến `CRON_SECRET` (Render tự sinh sẵn) → copy giá trị
+2. Vào https://uptimerobot.com → **Add New Monitor**:
+   - Monitor Type: **HTTP(s)**
+   - URL: `https://appdaovang-api-olkp.onrender.com/api/cron/scan?token=<CRON_SECRET vừa copy>`
+   - Monitoring Interval: **5 phút** (Render free ngủ sau 15 phút không traffic, ping dưới mốc đó để máy luôn thức)
+3. Create Monitor
+
+Mỗi lần UptimeRobot ping, server sẽ kiểm tra toàn bộ setup đang mở (báo thắng/thua nếu có) và tìm setup mới cho mọi user đã kết nối Telegram — không cần mở app.
+
 ## Giới hạn free tier cần biết
 
 - **Render free ngủ sau 15 phút không dùng** → lần mở đầu chờ ~30-50 giây cho API thức dậy. Mẹo: dùng https://uptimerobot.com (free) ping URL API mỗi 10 phút để không ngủ.
