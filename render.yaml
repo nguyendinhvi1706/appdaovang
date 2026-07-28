@@ -24,3 +24,6 @@ services:
         sync: false # tùy chọn — token bot từ @BotFather, để trống nếu không dùng báo Telegram
       - key: TELEGRAM_BOT_USERNAME
         sync: false # tùy chọn — username bot (không có @)
+      - key: TWELVEDATA_API_KEY
+        sync: false # tùy chọn nhưng khuyến nghị — API key free tại twelvedata.com (chỉ cần email),
+        # dùng lấy nến giá spot thật (thay Yahoo XAUUSD=X đã ngừng hoạt động). Để trống sẽ tự rơi về GC=F.

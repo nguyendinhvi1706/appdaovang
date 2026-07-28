@@ -95,14 +95,56 @@ export class MarketService {
   }
 
 
-  /** Nến OHLC từ Yahoo Finance — dùng chung cho AI Trader và SMC engine. Trả kèm `ticker` thực tế
-   *  đã dùng (VD "XAUUSD=X" hay fallback "GC=F") để nơi cần độ chính xác giá (Setup lệnh) tự quyết
-   *  định có tin dữ liệu hay không — xem candlesWithSource(). */
+  /** Nến OHLC giá spot thật từ Twelve Data (time_series) — thay thế Yahoo "XAUUSD=X" đã bị Yahoo gỡ
+   *  bỏ (404 vĩnh viễn). Cần biến môi trường TWELVEDATA_API_KEY (đăng ký free tại twelvedata.com,
+   *  chỉ cần email). Free tier giới hạn 800 request/ngày — chỉ dùng hàm này cho việc TẠO setup (ít
+   *  lần gọi), việc THEO DÕI setup đã tạo dùng giá spot Swissquote (không giới hạn) — xem ai.service.
+   *  Trả null nếu chưa cấu hình hoặc gọi lỗi — nơi gọi sẽ tự rơi về chuỗi fallback Yahoo cũ. */
+  private async twelveDataCandles(symbol: string, interval: '5m' | '15m' | '30m' | '1h' | '4h' | '1d'): Promise<Candle[] | null> {
+    const apikey = process.env.TWELVEDATA_API_KEY;
+    if (!apikey) return null;
+    const clean = symbol.replace('=X', '').toUpperCase();
+    if (!/^[A-Z]{6}$/.test(clean)) return null; // Twelve Data ở đây chỉ dùng cho cặp FX/kim loại 6 ký tự
+    const pair = `${clean.slice(0, 3)}/${clean.slice(3)}`;
+    const intervalMap: Record<string, string> = { '5m': '5min', '15m': '15min', '30m': '30min', '1h': '1h', '4h': '4h', '1d': '1day' };
+    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(pair)}&interval=${intervalMap[interval]}&outputsize=500&timezone=UTC&apikey=${apikey}`;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        console.warn(`[twelvedata] ${pair} ${interval}: HTTP ${res.status}`);
+        return null;
+      }
+      const json: any = await res.json();
+      if (json?.status === 'error' || !Array.isArray(json?.values)) {
+        console.warn(`[twelvedata] ${pair} ${interval}: ${json?.message ?? 'không có dữ liệu'}`);
+        return null;
+      }
+      // Twelve Data trả mới nhất trước — đảo lại cho đúng thứ tự thời gian tăng dần như phần còn lại của app
+      const out: Candle[] = json.values
+        .map((v: any) => ({
+          time: Math.floor(new Date(v.datetime.replace(' ', 'T') + 'Z').getTime() / 1000),
+          open: +v.open, high: +v.high, low: +v.low, close: +v.close,
+        }))
+        .reverse();
+      return out.length ? out : null;
+    } catch (e: any) {
+      console.warn(`[twelvedata] ${pair} ${interval}: ${e.message}`);
+      return null;
+    }
+  }
+
+  /** Nến OHLC — ưu tiên giá spot thật từ Twelve Data, rơi về Yahoo Finance (và futures COMEX) nếu
+   *  Twelve Data chưa cấu hình hoặc lỗi. Trả kèm `ticker` thực tế đã dùng để nơi cần độ chính xác
+   *  giá (Setup lệnh) tự quyết định có tin dữ liệu hay không — xem candlesWithSource(). */
   private candlesRaw(symbol: string, interval: '5m' | '15m' | '30m' | '1h' | '4h' | '1d' = '1h'): Promise<{ data: Candle[]; ticker: string | null }> {
     const ranges: Record<string, string> = { '5m': '5d', '15m': '5d', '30m': '1mo', '1h': '1mo', '4h': '3mo', '1d': '6mo' };
     const yInterval = interval === '4h' ? '1h' : interval; // Yahoo không có 4h, gộp từ 1h
     return this.cached(`candles:${symbol}:${interval}`, 60_000, async () => {
       const clean = symbol.replace('=X', '').toUpperCase();
+
+      const twelveData = await this.twelveDataCandles(symbol, interval);
+      if (twelveData) return { data: twelveData.slice(-500), ticker: `TWELVEDATA:${clean}` };
+
       // Chuỗi fallback: vàng/bạc dùng futures COMEX khi =X không có dữ liệu
       const candidates: string[] =
         clean === 'XAUUSD' ? ['XAUUSD=X', 'GC=F']
@@ -177,6 +219,18 @@ export class MarketService {
     const ranges: Record<string, string> = { '5m': '5d', '15m': '5d', '30m': '1mo', '1h': '1mo', '4h': '3mo', '1d': '6mo' };
     const yInterval = interval === '4h' ? '1h' : interval;
     const clean = symbol.replace('=X', '').toUpperCase();
+
+    const twelveDataConfigured = !!process.env.TWELVEDATA_API_KEY;
+    const twelveData = twelveDataConfigured ? await this.twelveDataCandles(symbol, interval) : null;
+    const twelveDataResult = {
+      ticker: `TWELVEDATA:${clean}`,
+      ok: !!twelveData,
+      configured: twelveDataConfigured,
+      candleCount: twelveData?.length ?? 0,
+      lastCandleAgeMin: twelveData?.length ? Math.round((Date.now() / 1000 - twelveData[twelveData.length - 1].time) / 60) : null,
+      lastClose: twelveData?.length ? twelveData[twelveData.length - 1].close : null,
+    };
+
     const candidates: string[] =
       clean === 'XAUUSD' ? ['XAUUSD=X', 'GC=F']
       : clean === 'XAGUSD' ? ['XAGUSD=X', 'SI=F']
@@ -213,7 +267,7 @@ export class MarketService {
         }
       }
     }
-    return { symbol, interval, results };
+    return { symbol, interval, twelveData: twelveDataResult, results };
   }
 
   gold() {

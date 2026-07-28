@@ -630,48 +630,29 @@ export class AiService implements OnModuleInit {
     const open = await this.prisma.aiSetup.findMany({ where });
     const cache = new Map<string, Candle[]>();
     for (const s of open) {
-      const ageDays = (Date.now() - s.createdAt.getTime()) / 86_400_000;
-      const iv = (ageDays > 4 ? '1h' : '5m') as '5m' | '1h';
-      const key = `${s.symbol}:${iv}`;
+      const key = s.symbol;
       if (!cache.has(key)) {
-        const { data, ticker } = await this.market
-          .candlesWithSource(s.symbol, iv)
-          .catch(() => ({ data: [] as Candle[], ticker: null as string | null }));
-        let cs = data;
-        if (MarketService.isFuturesTicker(ticker)) {
-          // Nguồn là hợp đồng tương lai (GC=F/SI=F) chứ không phải giá spot thật — basis với spot
-          // trôi theo thời gian nên KHÔNG dùng OHLC lịch sử futures để dò khớp entry/SL/TP (đã báo
-          // sai WIN thực tế). Thay vào đó lấy giá spot thật tức thời (Swissquote — luôn tươi, xác
-          // minh riêng, không phụ thuộc Yahoo) tại mỗi lượt quét (~90s/lần), ghép với giá lấy ở lượt
-          // quét TRƯỚC thành 1 "nến tổng hợp" [thấp nhất, cao nhất] để không bỏ sót biến động giữa
-          // 2 lượt quét — vẫn dò được khớp entry/SL/TP chính xác mà không cần tin dữ liệu futures.
-          const q = await this.market.quote(s.symbol).catch(() => null);
-          const prev = this.lastSpotBySymbol.get(s.symbol);
-          if (q?.price != null) {
-            cs = prev != null
-              ? [{
-                  time: Math.floor(Date.now() / 1000),
-                  open: prev, close: q.price,
-                  high: Math.max(prev, q.price), low: Math.min(prev, q.price),
-                }]
-              : [];
-            this.lastSpotBySymbol.set(s.symbol, q.price);
-          } else {
-            cs = [];
-          }
+        // Theo dõi LUÔN dùng giá spot thật tức thời (Swissquote — miễn phí, không giới hạn request,
+        // real-time), không dùng lại nến lịch sử từ nguồn ngoài (OANDA/Twelve Data/GC=F) nữa. Lý do
+        // kép: (1) tránh lặp lại đúng lỗi basis-drift từng khiến hệ thống báo sai WIN trong khi giá
+        // spot thật chưa từng chạm TP; (2) các API nến miễn phí đều giới hạn số request/ngày khá
+        // thấp, chỉ nên dành cho việc TẠO setup (gọi ít hơn nhiều), không dùng cho vòng quét mỗi
+        // ~90 giây này. Ghép giá lượt quét này với lượt quét TRƯỚC thành 1 "nến tổng hợp" [thấp
+        // nhất, cao nhất] để không bỏ sót biến động giữa 2 lượt.
+        const q = await this.market.quote(s.symbol).catch(() => null);
+        const prev = this.lastSpotBySymbol.get(s.symbol);
+        let cs: Candle[];
+        if (q?.price != null) {
+          cs = prev != null
+            ? [{
+                time: Math.floor(Date.now() / 1000),
+                open: prev, close: q.price,
+                high: Math.max(prev, q.price), low: Math.min(prev, q.price),
+              }]
+            : [];
+          this.lastSpotBySymbol.set(s.symbol, q.price);
         } else {
-          // Nguồn spot thật — chỉ bù lệch nhỏ, ổn định giữa Yahoo XAUUSD=X và Swissquote (2 nhà
-          // cung cấp giá spot khác nhau), không phải bù basis futures.
-          const q = await this.market.quote(s.symbol).catch(() => null);
-          if (q?.price != null && cs.length) {
-            const off = q.price - cs[cs.length - 1].close;
-            if (Math.abs(off) / q.price > 0.0005) {
-              cs = cs.map((c) => ({
-                time: c.time,
-                open: c.open + off, high: c.high + off, low: c.low + off, close: c.close + off,
-              }));
-            }
-          }
+          cs = [];
         }
         cache.set(key, cs);
       }

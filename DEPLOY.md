@@ -67,6 +67,16 @@ Cấu hình ngay trong app, không cần vào Render:
 
 Nếu chưa cấu hình, thẻ Telegram trong app tự hiện form nhập — không ảnh hưởng gì đến các tính năng khác. (Vẫn có thể đặt qua biến môi trường `TELEGRAM_BOT_TOKEN`/`TELEGRAM_BOT_USERNAME` trên Render nếu muốn, nhưng không bắt buộc nữa.)
 
+## Bước 7 — Nến giá spot thật cho AI Setup lệnh (khuyến nghị)
+
+Yahoo Finance đã gỡ bỏ ticker giá spot vàng (`XAUUSD=X`, lỗi 404 vĩnh viễn), nên mặc định hệ thống phải dùng tạm hợp đồng tương lai COMEX (`GC=F`) để phân tích cấu trúc/tính entry — vẫn dùng được nhưng độ chính xác thấp hơn một chút. Để dùng đúng giá spot thật:
+
+1. Đăng ký tài khoản miễn phí tại https://twelvedata.com (chỉ cần email, không cần thẻ, không có bước xác minh phức tạp)
+2. Vào **Dashboard** → copy **API Key**
+3. Vào Render → service API → **Environment** → thêm biến `TWELVEDATA_API_KEY` = key vừa copy → Save Changes (Render tự deploy lại)
+
+Không cấu hình vẫn hoạt động bình thường (tự rơi về GC=F), đây chỉ là bước nâng cao độ chính xác. Việc theo dõi thắng/thua của setup đã tạo không dùng Twelve Data (dùng giá spot Swissquote không giới hạn), nên gói miễn phí (800 request/ngày) vẫn đủ dùng thoải mái chỉ cho việc tạo setup mới.
+
 ## Giới hạn free tier cần biết
 
 - **Render free ngủ sau 15 phút không dùng** → lần mở đầu chờ ~30-50 giây cho API thức dậy. Mẹo: dùng https://uptimerobot.com (free) ping URL API mỗi 10 phút để không ngủ.
