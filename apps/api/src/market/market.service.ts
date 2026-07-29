@@ -106,11 +106,25 @@ export class MarketService {
   private stripSyntheticCandles(candles: Candle[]): Candle[] {
     if (candles.length < 10) return candles;
 
-    const openCount = new Map<number, number>();
-    for (const c of candles) openCount.set(c.open, (openCount.get(c.open) ?? 0) + 1);
-    let out = candles.filter((c) => (openCount.get(c.open) ?? 0) < 4);
+    // (1) Lọc theo LỊCH PHIÊN — cách xác định nhất: thị trường vàng/forex đóng cửa từ thứ Sáu
+    // 21:00 UTC đến Chủ Nhật 22:00 UTC. Mọi nến rơi vào khoảng này đều là nến lấp giả.
+    let out = candles.filter((c) => {
+      const d = new Date(c.time * 1000);
+      const day = d.getUTCDay(); // 0=CN, 5=T6, 6=T7
+      const hour = d.getUTCHours();
+      if (day === 6) return false;                  // cả thứ Bảy
+      if (day === 5 && hour >= 21) return false;    // sau giờ đóng cửa thứ Sáu
+      if (day === 0 && hour < 22) return false;     // Chủ Nhật trước giờ mở cửa lại
+      return true;
+    });
 
-    // Biên độ trung vị của phần dữ liệu còn lại làm mốc so sánh (bền với ngoại lệ hơn trung bình)
+    // (2) Giá mở cửa lặp lại y hệt nhiều lần — bắt các khoảng nguồn treo/nghỉ lễ ngoài cuối tuần
+    // (dữ liệu thật gần như không bao giờ trùng tới 5 chữ số thập phân).
+    const openCount = new Map<number, number>();
+    for (const c of out) openCount.set(c.open, (openCount.get(c.open) ?? 0) + 1);
+    out = out.filter((c) => (openCount.get(c.open) ?? 0) < 4);
+
+    // (3) Nến "gộp gap" đầu phiên: biên độ trung vị làm mốc (bền với ngoại lệ hơn trung bình).
     const ranges = out.map((c) => c.high - c.low).sort((a, b) => a - b);
     const median = ranges[Math.floor(ranges.length / 2)];
     if (median > 0) out = out.filter((c) => c.high - c.low <= median * 15);
