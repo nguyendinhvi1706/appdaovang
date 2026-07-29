@@ -95,6 +95,29 @@ export class MarketService {
   }
 
 
+  /** Twelve Data lấp đầy khoảng thị trường ĐÓNG CỬA (cuối tuần) bằng nến GIẢ: hàng trăm nến liên
+   *  tiếp có cùng giá mở cửa tới 5 chữ số thập phân, biên độ chỉ ~0.2$ — không phải giao dịch thật.
+   *  Nếu giữ lại: ATR bị kéo xuống rất thấp (SL đặt quá sát, dễ quét), swing/Order Block/FVG nhận
+   *  diện nhầm trên nhiễu phẳng, EMA bị bóp méo. Nhận diện bằng "giá mở cửa lặp lại y hệt nhiều
+   *  lần" (dữ liệu thật gần như không bao giờ trùng tới 5 số lẻ) rồi loại bỏ.
+   *
+   *  Đồng thời loại nến "gộp gap" đầu phiên mở cửa lại — biên độ phình gấp hàng chục lần bình
+   *  thường vì gộp cả khoảng nhảy giá cuối tuần, không phản ánh biến động thật trong 15 phút đó. */
+  private stripSyntheticCandles(candles: Candle[]): Candle[] {
+    if (candles.length < 10) return candles;
+
+    const openCount = new Map<number, number>();
+    for (const c of candles) openCount.set(c.open, (openCount.get(c.open) ?? 0) + 1);
+    let out = candles.filter((c) => (openCount.get(c.open) ?? 0) < 4);
+
+    // Biên độ trung vị của phần dữ liệu còn lại làm mốc so sánh (bền với ngoại lệ hơn trung bình)
+    const ranges = out.map((c) => c.high - c.low).sort((a, b) => a - b);
+    const median = ranges[Math.floor(ranges.length / 2)];
+    if (median > 0) out = out.filter((c) => c.high - c.low <= median * 15);
+
+    return out;
+  }
+
   /** Nến OHLC giá spot thật từ Twelve Data (time_series) — thay thế Yahoo "XAUUSD=X" đã bị Yahoo gỡ
    *  bỏ (404 vĩnh viễn). Cần biến môi trường TWELVEDATA_API_KEY (đăng ký free tại twelvedata.com,
    *  chỉ cần email). Free tier giới hạn 800 request/ngày — chỉ dùng hàm này cho việc TẠO setup (ít
@@ -120,12 +143,13 @@ export class MarketService {
         return null;
       }
       // Twelve Data trả mới nhất trước — đảo lại cho đúng thứ tự thời gian tăng dần như phần còn lại của app
-      const out: Candle[] = json.values
+      const raw: Candle[] = json.values
         .map((v: any) => ({
           time: Math.floor(new Date(v.datetime.replace(' ', 'T') + 'Z').getTime() / 1000),
           open: +v.open, high: +v.high, low: +v.low, close: +v.close,
         }))
         .reverse();
+      const out = this.stripSyntheticCandles(raw);
       return out.length ? out : null;
     } catch (e: any) {
       console.warn(`[twelvedata] ${pair} ${interval}: ${e.message}`);
