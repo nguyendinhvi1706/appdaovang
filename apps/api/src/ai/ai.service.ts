@@ -11,6 +11,16 @@ export type ChatMessage = { role: 'user' | 'assistant'; content: string };
 /** Tìm sóng 3 điểm gần nhất 0→A→B theo đúng loại điểm B mong muốn (dùng cho SK System: Fibonacci
  *  Retracement/Extension). B là swing gần hiện tại nhất đúng loại (điểm hồi), A là swing xen kẽ
  *  ngay trước B (đỉnh/đáy sóng dẫn đường), 0 là swing cùng loại B ngay trước A (điểm bắt đầu sóng). */
+/** Nới Stop Loss ra xa nếu khoảng cách tới entry nhỏ hơn mức tối thiểu an toàn.
+ *  Lý do: SL tính thuần theo cấu trúc (rìa Order Block, mốc Fibonacci 0.786) có thể chỉ cách entry
+ *  1-5$ trên XAUUSD — nằm HẲN TRONG biên độ nhiễu bình thường của khung M15 (ATR thường 4-8$), nên
+ *  gần như chắc chắn bị quét trước khi giá kịp đi tới TP, kể cả khi hướng phân tích đúng. Đây là
+ *  nguyên nhân gốc của chuỗi thua liên tiếp toàn bộ do "chạm SL". */
+function enforceMinStop(entry: number, sl: number, bull: boolean, minDist: number): number {
+  if (Math.abs(entry - sl) >= minDist) return sl;
+  return bull ? entry - minDist : entry + minDist;
+}
+
 function pickWave(swings: Swing[], wantKind: 'high' | 'low'): { s0: Swing; sA: Swing; sB: Swing } | null {
   let iB = -1;
   for (let i = swings.length - 1; i >= 0; i--) { if (swings[i].kind === wantKind) { iB = i; break; } }
@@ -391,6 +401,9 @@ export class AiService implements OnModuleInit {
     // quy toàn bộ mức giá SMC/Fibonacci bên dưới về hệ giá spot thật tại thời điểm hiện tại
     const offM = spot - lastClose;
     const aRef = atr(h1) ?? spot * 0.005;
+    // Khoảng cách Stop Loss TỐI THIỂU: 1.5×ATR(M15) hoặc 0.1% giá — lấy giá trị lớn hơn. SL sát hơn
+    // mức này nằm trong biên độ nhiễu thường ngày và sẽ bị quét gần như chắc chắn (xem enforceMinStop).
+    const minSlDist = Math.max(aRef * 1.5, spot * 0.001);
     const m15Swings = detectSwings(h1);
 
     // Xu hướng H1: ưu tiên BOS/CHOCH gần nhất (phản ứng ngay khi cấu trúc bị phá — không trễ
@@ -456,18 +469,23 @@ export class AiService implements OnModuleInit {
       const fibLevel = (r: number) => (bull ? sAP - r * range : sAP + r * range);
       entry = fibLevel(0.618); // điểm "tỉ lệ vàng" giữa vùng 0.5-0.667
       const slFib = fibLevel(0.786);
-      const buffer = aRef * 0.15;
-      sl = bull ? slFib - buffer : slFib + buffer;
+      // Đệm 0.5×ATR (trước đây 0.15×ATR — quá mỏng): dải Fibonacci 0.618→0.786 chỉ chiếm 16.8% biên
+      // sóng, nên nếu sóng nhỏ thì SL chỉ cách entry vài đô. Cộng thêm ngưỡng sàn minSlDist bên dưới.
+      const buffer = aRef * 0.5;
+      sl = enforceMinStop(entry, bull ? slFib - buffer : slFib + buffer, bull, minSlDist);
       const slDist = Math.abs(entry - sl);
 
-      // Chọn tỉ lệ Extension nhỏ nhất đạt RR tối thiểu 1:1 (giống logic chọn TP của SMC) thay vì
-      // luôn lấy tỉ lệ lớn nhất — tránh mục tiêu viển vông không có căn cứ.
+      // Chọn tỉ lệ Extension nhỏ nhất cho RR nằm trong khoảng HỢP LÝ 1:1.5 - 1:5. Trước đây chỉ yêu
+      // cầu RR ≥ 1:1 nên mốc nhỏ nhất luôn thoả (vì SL quá sát), sinh ra mục tiêu cách 90$ trên khung
+      // M15 — RR trên giấy rất đẹp nhưng xác suất chạm gần như không có.
       const ratios = [1.272, 1.382, 1.618, 1.809, 2];
-      let usedRatio = 1.618;
-      tp = bull ? sBP + usedRatio * range : sBP - usedRatio * range;
+      const minRR = 1.5, maxRR = 5;
+      let usedRatio: number | null = null;
+      tp = bull ? entry + slDist * 2.5 : entry - slDist * 2.5;
       for (const r of ratios) {
         const cand = bull ? sBP + r * range : sBP - r * range;
-        if (Math.abs(cand - entry) / slDist >= 1) { tp = cand; usedRatio = r; break; }
+        const candRR = Math.abs(cand - entry) / slDist;
+        if (candRR >= minRR && candRR <= maxRR) { tp = cand; usedRatio = r; break; }
       }
       rr = +(Math.abs(tp - entry) / slDist).toFixed(2);
 
@@ -493,8 +511,10 @@ export class AiService implements OnModuleInit {
         `Cấu trúc H1 ${trendClause}. ` +
         `Trên M15 xác định sóng ${bull ? 'tăng' : 'giảm'} 3 điểm theo SK System: điểm 0 tại ${s0P.toFixed(2)}, điểm A tại ${sAP.toFixed(2)}, điểm B (hồi gần nhất) tại ${sBP.toFixed(2)} — ${bull ? 'đáy sau cao hơn đáy trước' : 'đỉnh sau thấp hơn đỉnh trước'}, xác nhận cấu trúc ${bull ? 'tăng' : 'giảm'} còn hiệu lực. ` +
         `Chờ giá hồi về vùng Fibonacci Retracement 0.5-0.667 (điểm vào ${entry.toFixed(2)}) để vào ${direction}. ` +
-        `Stop Loss đặt sau mốc Fibonacci 0.786 tại ${sl.toFixed(2)}. ` +
-        `Take Profit đặt tại mốc Fibonacci Extension ${usedRatio} chiếu từ điểm B (${tp.toFixed(2)}), đạt tỷ lệ Risk:Reward 1:${rr}.` + warnClause;
+        `Stop Loss đặt sau mốc Fibonacci 0.786 tại ${sl.toFixed(2)} (đã nới tối thiểu 1.5×ATR để không bị quét bởi nhiễu thường ngày). ` +
+        (usedRatio
+          ? `Take Profit đặt tại mốc Fibonacci Extension ${usedRatio} chiếu từ điểm B (${tp.toFixed(2)}), đạt tỷ lệ Risk:Reward 1:${rr}.`
+          : `Không mốc Fibonacci Extension nào cho RR hợp lý trong khoảng 1:1.5-1:5 nên Take Profit dùng mức RR 1:2.5 mặc định (${tp.toFixed(2)}).`) + warnClause;
 
       aiSystemMsg =
         'Bạn là chuyên gia phân tích Fibonacci Retracement/Extension (SK System) viết tiếng Việt. Nhiệm vụ DUY NHẤT: diễn giải lại một quyết định giao dịch ĐÃ CÓ SẴN ' +
@@ -503,7 +523,7 @@ export class AiService implements OnModuleInit {
         `${skText}\n\n` +
         `Setup đã được thuật toán SK System (Fibonacci) chốt từ dữ liệu trên — các con số dưới đây là CUỐI CÙNG, không được đổi:\n` +
         `- Hướng: ${direction}\n- Entry: ${entry.toFixed(2)} (Fibonacci Retracement 0.618 của sóng 0-A)\n` +
-        `- Stop Loss: ${sl.toFixed(2)} (sau mốc Fibonacci 0.786)\n- Take Profit: ${tp.toFixed(2)} (Fibonacci Extension ${usedRatio} chiếu từ điểm B)\n- RR: 1:${rr}\n` +
+        `- Stop Loss: ${sl.toFixed(2)} (sau mốc Fibonacci 0.786, nới tối thiểu 1.5×ATR)\n- Take Profit: ${tp.toFixed(2)} (${usedRatio ? `Fibonacci Extension ${usedRatio} chiếu từ điểm B` : 'RR 1:2.5 mặc định — không mốc Extension nào cho RR hợp lý'})\n- RR: 1:${rr}\n` +
         `- Xu hướng H1: ${h1Trend ?? 'chưa xác định rõ'}${lastH1Event ? ` (${eventAgeText} có ${lastH1Event.type})` : ' (theo EMA, H1 chưa có phá cấu trúc)'}\n` +
         (counterTrend ? `- LƯU Ý BẮT BUỘC: đây là lệnh NGƯỢC xu hướng H1 do người dùng tự chọn hướng — PHẢI nêu rõ trong câu giải thích rằng đây là lệnh ngược xu hướng, rủi ro cao hơn.\n` : '') +
         `\nViết 2-3 câu tiếng Việt giải thích NGẮN GỌN vì sao chọn đúng các con số này. Không liệt kê phương án khác, không đổi số.`;
@@ -560,14 +580,16 @@ export class AiService implements OnModuleInit {
       }
       const { zone, kind } = picked;
       entry = bull ? zone.top : zone.bottom; // chờ giá retest về rìa vùng gần nhất
-      const buffer = aRef * 0.15;
-      sl = bull ? zone.bottom - buffer : zone.top + buffer; // SL ngoài vùng
+      // Đệm 0.5×ATR (trước đây 0.15×ATR — quá mỏng) + ngưỡng sàn minSlDist: vùng Order Block/FVG có
+      // thể rất hẹp, khiến SL chỉ cách entry 1-2$ và bị nhiễu quét ngay dù hướng phân tích đúng.
+      const buffer = aRef * 0.5;
+      sl = enforceMinStop(entry, bull ? zone.bottom - buffer : zone.top + buffer, bull, minSlDist);
       const slDist = Math.abs(entry - sl);
 
       // Quy trình chọn TP CỐ ĐỊNH: trong các vùng thanh khoản đúng hướng, lấy vùng GẦN NHẤT đạt RR
       // tối thiểu 1:1 (không phải vùng gần nhất tuyệt đối, vì có thể quá gần để đáng vào lệnh); nếu
       // không vùng nào đạt, dùng RR 1:2 mặc định. Giới hạn RR tối đa 1:5 để tránh mục tiêu viển vông.
-      const minRR = 1;
+      const minRR = 1.5;
       const maxRR = 5;
       const liqInDirection = liquidity
         .filter((e) => (bull ? e.price > entry : e.price < entry))
@@ -580,10 +602,10 @@ export class AiService implements OnModuleInit {
         tp = qualifying.price;
         tpNote = `vùng thanh khoản ${qualifying.kind} ${qualifying.price.toFixed(2)} — điểm hút thanh khoản gần nhất theo hướng ${bull ? 'tăng' : 'giảm'}, đạt RR tối thiểu 1:${minRR}`;
       } else {
-        tp = bull ? entry + slDist * 2 : entry - slDist * 2;
+        tp = bull ? entry + slDist * 2.5 : entry - slDist * 2.5;
         tpNote = liqInDirection.length
-          ? `RR 1:2 mặc định (vùng thanh khoản gần nhất ${liqInDirection[0].price.toFixed(2)} không đạt RR hợp lý trong khoảng 1:${minRR}-1:${maxRR})`
-          : 'RR 1:2 mặc định (chưa phát hiện vùng thanh khoản phù hợp theo hướng này)';
+          ? `RR 1:2.5 mặc định (vùng thanh khoản gần nhất ${liqInDirection[0].price.toFixed(2)} không đạt RR hợp lý trong khoảng 1:${minRR}-1:${maxRR})`
+          : 'RR 1:2.5 mặc định (chưa phát hiện vùng thanh khoản phù hợp theo hướng này)';
       }
       rr = +(Math.abs(tp - entry) / slDist).toFixed(2);
 
