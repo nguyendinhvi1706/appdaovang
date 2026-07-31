@@ -31,6 +31,7 @@ const defaults = {
 const strategyLabels: Record<string, string> = {
   ema_cross: 'EMA Cross', rsi_reversion: 'RSI đảo chiều', smc_bos: 'SMC BOS',
   cyclical_extreme: 'Cyclical Extreme (Fisher)', grid_369: 'Lưới 369 (kiểm chứng)',
+  live_smc: '⭐ Setup lệnh thật — SMC', live_sk: '⭐ Setup lệnh thật — SK System',
 };
 
 export default function BacktestPage() {
@@ -167,8 +168,19 @@ export default function BacktestPage() {
             <option value="smc_bos">SMC BOS</option>
             <option value="cyclical_extreme">Cyclical Extreme (Fisher)</option>
             <option value="grid_369">Lưới 369 (kiểm chứng)</option>
+            <option value="live_smc">⭐ Setup lệnh thật — SMC</option>
+            <option value="live_sk">⭐ Setup lệnh thật — SK System</option>
           </select>
         </label>
+        {(form.strategy === 'live_smc' || form.strategy === 'live_sk') && (
+          <p className="sm:col-span-3 text-xs text-slate-400 leading-relaxed">
+            Chạy đúng thuật toán mà mục <b>Setup lệnh</b> đang dùng thật: entry chờ retest{' '}
+            {form.strategy === 'live_smc' ? 'rìa Order Block/FVG gần nhất' : 'mốc Fibonacci 0.618 của sóng 3 điểm'},
+            SL tối thiểu 1.5×ATR, RR giới hạn 1:1.5–1:5, lệnh chờ quá ~1 ngày chưa khớp thì huỷ.
+            Các ô ATR/SL/RR bên dưới KHÔNG áp dụng (thuật toán tự quyết định), chỉ <b>% rủi ro</b> và{' '}
+            <b>vốn ban đầu</b> có tác dụng. Nên chạy khung <b>15m</b> để khớp với bản chạy thật.
+          </p>
+        )}
         {form.strategy === 'ema_cross' && (<>
           <label>EMA nhanh<input className="input mt-1" type="number" value={form.emaFast} onChange={(e) => set('emaFast', +e.target.value)} /></label>
           <label>EMA chậm<input className="input mt-1" type="number" value={form.emaSlow} onChange={(e) => set('emaSlow', +e.target.value)} /></label>

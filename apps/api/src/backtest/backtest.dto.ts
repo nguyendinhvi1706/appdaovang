@@ -8,8 +8,8 @@ export class RunBacktestDto {
   @IsIn(['5m', '15m', '30m', '1h', '4h', '1d'])
   interval: '5m' | '15m' | '30m' | '1h' | '4h' | '1d';
 
-  @IsEnum(['ema_cross', 'rsi_reversion', 'smc_bos', 'cyclical_extreme', 'grid_369'])
-  strategy: 'ema_cross' | 'rsi_reversion' | 'smc_bos' | 'cyclical_extreme' | 'grid_369';
+  @IsEnum(['ema_cross', 'rsi_reversion', 'smc_bos', 'cyclical_extreme', 'grid_369', 'live_smc', 'live_sk'])
+  strategy: 'ema_cross' | 'rsi_reversion' | 'smc_bos' | 'cyclical_extreme' | 'grid_369' | 'live_smc' | 'live_sk';
 
   @IsOptional() @Type(() => Number) @IsNumber() @Min(2) @Max(200)
   emaFast = 9;

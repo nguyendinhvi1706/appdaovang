@@ -1,8 +1,11 @@
 import { Candle } from '../market/market.service';
 import { detectStructure, detectSwings } from '../smc/smc.engine';
 import { detectCyclicalExtremes, fisherTransform } from '../ai/indicators';
+import { decideLiveSetup } from './live-setup.strategy';
 
-export type StrategyId = 'ema_cross' | 'rsi_reversion' | 'smc_bos' | 'cyclical_extreme' | 'grid_369';
+export type StrategyId =
+  | 'ema_cross' | 'rsi_reversion' | 'smc_bos' | 'cyclical_extreme' | 'grid_369'
+  | 'live_smc' | 'live_sk';
 
 export type BacktestConfig = {
   strategy: StrategyId;
@@ -169,6 +172,9 @@ function buildSignals(c: Candle[], cfg: BacktestConfig): ('buy' | 'sell' | null)
 
 // ---------- Mô phỏng ----------
 export function runBacktest(c: Candle[], cfg: BacktestConfig): BacktestResult {
+  if (cfg.strategy === 'live_smc' || cfg.strategy === 'live_sk') {
+    return runLiveSetupBacktest(c, cfg);
+  }
   const signals = buildSignals(c, cfg);
   const atr = atrSeries(c, cfg.atrPeriod);
 
@@ -221,7 +227,92 @@ export function runBacktest(c: Candle[], cfg: BacktestConfig): BacktestResult {
   }
   if (pos) close(c.length - 1, c[c.length - 1].close, 'END');
 
-  // ---------- Thống kê ----------
+  return summarize(trades, equity, cfg);
+}
+
+/**
+ * Backtest cho logic "Setup lệnh" thật (live_smc / live_sk). Khác hẳn các chiến lược còn lại ở chỗ
+ * entry/SL/TP do chính thuật toán live quyết định (không phải ATR × hệ số), và lệnh là LỆNH CHỜ:
+ * chỉ khớp khi giá quay lại chạm entry, hết hạn thì huỷ — đúng như cách app đang chạy thật.
+ */
+function runLiveSetupBacktest(c: Candle[], cfg: BacktestConfig): BacktestResult {
+  const method: 'SMC' | 'SK' = cfg.strategy === 'live_sk' ? 'SK' : 'SMC';
+  const WINDOW = 500;      // số nến quá khứ dùng để phân tích, khớp giới hạn của bản live
+  const WARMUP = 120;      // đủ nến để dựng H1 (÷4) và EMA50 trên H1
+  const PENDING_BARS = 96; // lệnh chờ quá 96 nến (~1 ngày trên M15) mà chưa khớp thì huỷ
+
+  let balance = cfg.initialBalance;
+  const trades: Trade[] = [];
+  const equity: { time: number; value: number }[] = [{ time: c[0].time, value: balance }];
+
+  type Pending = { direction: 'BUY' | 'SELL'; entry: number; sl: number; tp: number; expireAt: number };
+  type Pos = { direction: 'BUY' | 'SELL'; entryTime: number; entry: number; sl: number; tp: number; riskAmt: number };
+  let pending: Pending | null = null;
+  let pos: Pos | null = null;
+
+  const closePos = (i: number, exitPrice: number, reason: Trade['reason']) => {
+    if (!pos) return;
+    const slDist = Math.abs(pos.entry - pos.sl);
+    const move = pos.direction === 'BUY' ? exitPrice - pos.entry : pos.entry - exitPrice;
+    const r = slDist > 0 ? move / slDist : 0;
+    const pnl = +(r * pos.riskAmt).toFixed(2);
+    balance = +(balance + pnl).toFixed(2);
+    trades.push({
+      direction: pos.direction, entryTime: pos.entryTime, entryPrice: +pos.entry.toFixed(4),
+      exitTime: c[i].time, exitPrice: +exitPrice.toFixed(4),
+      sl: +pos.sl.toFixed(4), tp: +pos.tp.toFixed(4),
+      r: +r.toFixed(2), pnl, reason,
+    });
+    equity.push({ time: c[i].time, value: balance });
+    pos = null;
+  };
+
+  for (let i = WARMUP; i < c.length; i++) {
+    const bar = c[i];
+
+    // 1) Lệnh đang chạy: kiểm tra SL trước rồi TP (bảo thủ — giống bản live)
+    if (pos) {
+      if (pos.direction === 'BUY') {
+        if (bar.low <= pos.sl) closePos(i, pos.sl, 'SL');
+        else if (bar.high >= pos.tp) closePos(i, pos.tp, 'TP');
+      } else {
+        if (bar.high >= pos.sl) closePos(i, pos.sl, 'SL');
+        else if (bar.low <= pos.tp) closePos(i, pos.tp, 'TP');
+      }
+    }
+
+    // 2) Lệnh chờ: khớp khi giá chạm entry, hết hạn thì huỷ
+    if (!pos && pending) {
+      if (bar.low <= pending.entry && pending.entry <= bar.high) {
+        pos = {
+          direction: pending.direction, entryTime: bar.time, entry: pending.entry,
+          sl: pending.sl, tp: pending.tp,
+          riskAmt: +(balance * cfg.riskPercent / 100).toFixed(2),
+        };
+        pending = null;
+      } else if (i >= pending.expireAt) {
+        pending = null;
+      }
+    }
+
+    // 3) Rảnh tay (không lệnh chạy, không lệnh chờ) → tìm setup mới trên đúng dữ liệu ĐÃ ĐÓNG
+    if (!pos && !pending && balance > 0) {
+      const setup = decideLiveSetup(c.slice(Math.max(0, i - WINDOW + 1), i + 1), method);
+      if (setup) {
+        pending = {
+          direction: setup.direction, entry: setup.entry, sl: setup.sl, tp: setup.tp,
+          expireAt: i + PENDING_BARS,
+        };
+      }
+    }
+  }
+  if (pos) closePos(c.length - 1, c[c.length - 1].close, 'END');
+
+  return summarize(trades, equity, cfg);
+}
+
+function summarize(trades: Trade[], equity: { time: number; value: number }[], cfg: BacktestConfig): BacktestResult {
+  const balance = equity.length ? equity[equity.length - 1].value : cfg.initialBalance;
   const wins = trades.filter((t) => t.pnl > 0);
   const losses = trades.filter((t) => t.pnl <= 0);
   const grossProfit = wins.reduce((s, t) => s + t.pnl, 0);
