@@ -17,21 +17,20 @@ type Result = {
     netProfit: number; finalBalance: number; profitFactor: number | null;
     expectancyR: number; expectancyUsd: number; maxDrawdownPct: number;
     maxLoseStreak: number; avgWinUsd: number; avgLossUsd: number;
+    stdDevR?: number;
   };
   periodDays?: number;
 };
 
 /** Khoảng tin cậy 95% của kỳ vọng R — cho biết kết quả có phân biệt được với "vô dụng" hay không.
  *  Đây là thứ quan trọng hơn winrate: nếu khoảng này còn chứa số 0 thì cỡ mẫu chưa đủ để kết luận,
- *  dù lợi nhuận hiển thị có đẹp đến đâu (vài lệnh may mắn cũng cho profit factor rất cao). */
-function confidence(n: number, expR: number, wins: number) {
-  if (n < 2) return null;
-  const losses = n - wins;
-  const vals = [...Array(wins).fill(2.0), ...Array(losses).fill(-1.0)];
-  const m = vals.reduce((a, b) => a + b, 0) / n;
-  const sd = Math.sqrt(vals.reduce((s, v) => s + (v - m) ** 2, 0) / Math.max(1, n - 1));
-  const se = sd / Math.sqrt(n);
-  return { lo: expR - 1.96 * se, hi: expR + 1.96 * se };
+ *  dù lợi nhuận hiển thị có đẹp đến đâu (vài lệnh may mắn cũng cho profit factor rất cao).
+ *  Dùng ĐỘ LỆCH CHUẨN THẬT từ backend — trước đây ước lượng bằng giả định "thắng = 2R" cho ra
+ *  khoảng hẹp hơn thực tế, tức lạc quan sai. */
+function confidence(n: number, expR: number, sdR: number) {
+  if (n < 2 || !sdR) return null;
+  const se = sdR / Math.sqrt(n);
+  return { lo: expR - 1.96 * se, hi: expR + 1.96 * se, t: expR / se };
 }
 
 const defaults = {
@@ -252,7 +251,7 @@ export default function BacktestPage() {
             ))}
           </div>
           {(() => {
-            const ci = confidence(s!.totalTrades, s!.expectancyR, s!.wins);
+            const ci = confidence(s!.totalTrades, s!.expectancyR, s!.stdDevR ?? 0);
             if (!ci) return null;
             const inconclusive = ci.lo < 0 && ci.hi > 0;
             return (

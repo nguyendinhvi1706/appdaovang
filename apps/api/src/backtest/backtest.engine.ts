@@ -44,6 +44,9 @@ export type BacktestResult = {
     profitFactor: number | null; expectancyR: number; expectancyUsd: number;
     maxDrawdownPct: number; maxLoseStreak: number;
     avgWinUsd: number; avgLossUsd: number;
+    /** Độ lệch chuẩn của kết quả R từng lệnh — cần để tính khoảng tin cậy ĐÚNG. Không thể ước
+     *  lượng bằng cách giả định "thắng = 2R" vì TP thực tế trải từ 1.5R đến 5R. */
+    stdDevR: number;
   };
 };
 
@@ -345,6 +348,12 @@ function summarize(trades: Trade[], equity: { time: number; value: number }[], c
       maxLoseStreak: maxStreak,
       avgWinUsd: wins.length ? +(grossProfit / wins.length).toFixed(2) : 0,
       avgLossUsd: losses.length ? +(grossLoss / losses.length).toFixed(2) : 0,
+      stdDevR: (() => {
+        if (trades.length < 2) return 0;
+        const m = trades.reduce((s, t) => s + t.r, 0) / trades.length;
+        const v = trades.reduce((s, t) => s + (t.r - m) ** 2, 0) / (trades.length - 1);
+        return +Math.sqrt(v).toFixed(3);
+      })(),
     },
   };
 }
