@@ -208,7 +208,7 @@ function SetupsTab() {
   const [setups, setSetups] = useState<Setup[]>([]);
   const [symbol, setSymbol] = useState('XAUUSD');
   const [direction, setDirection] = useState<'AUTO' | 'BUY' | 'SELL'>('AUTO');
-  const [method, setMethod] = useState<'SMC' | 'SK'>('SMC');
+  const [method, setMethod] = useState<'SMC' | 'SK' | 'ICT'>('SMC');
   const [creating, setCreating] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -265,9 +265,10 @@ function SetupsTab() {
             <option value="SELL">Buộc SELL</option>
           </select>
           <select className="input w-auto" value={method} onChange={(e) => setMethod(e.target.value as any)}
-            title="SMC: Order Block/FVG + thanh khoản. SK System: Fibonacci Retracement/Extension (sóng 0-A-B).">
+            title="SMC: Order Block/FVG + thanh khoản. SK System: Fibonacci Retracement/Extension (sóng 0-A-B). ICT: quét thanh khoản + Killzone + Premium/Discount — backtest cho kết quả LỖ, chỉ để tham khảo.">
             <option value="SMC">SMC (Order Block/FVG)</option>
             <option value="SK">SK System (Fibonacci)</option>
+            <option value="ICT">ICT (quét thanh khoản) ⚠️</option>
           </select>
           <button className="btn" onClick={create} disabled={creating}>
             {creating ? '🤖 AI đang phân tích...' : '🎯 Tạo setup mới'}

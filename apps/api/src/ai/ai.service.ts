@@ -5,6 +5,8 @@ import { MarketService } from '../market/market.service';
 import { TelegramService } from '../telegram/telegram.service';
 import { atr, Candle, ema, rsi, swingLevels } from './indicators';
 import { detectEqualLevels, detectFVG, detectOrderBlocks, detectStructure, detectSwings, Swing, Zone } from '../smc/smc.engine';
+// Dùng chung hàm với Backtest — bảo đảm logic chạy thật ĐÚNG BẰNG logic đã được đo lường
+import { decideIctSetup } from '../backtest/live-setup.strategy';
 
 export type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
@@ -361,7 +363,7 @@ export class AiService implements OnModuleInit {
     userId: string,
     symbolRaw: string,
     wantDirection: 'AUTO' | 'BUY' | 'SELL' = 'AUTO',
-    method: 'SMC' | 'SK' = 'SMC',
+    method: 'SMC' | 'SK' | 'ICT' = 'SMC',
   ) {
     const symbol = symbolRaw.toUpperCase();
     // Ghi chú quan trọng: Yahoo Finance đã bỏ ticker "XAUUSD=X" (trả 404 thẳng, không phải trễ) nên
@@ -528,6 +530,57 @@ export class AiService implements OnModuleInit {
         (counterTrend ? `- LƯU Ý BẮT BUỘC: đây là lệnh NGƯỢC xu hướng H1 do người dùng tự chọn hướng — PHẢI nêu rõ trong câu giải thích rằng đây là lệnh ngược xu hướng, rủi ro cao hơn.\n` : '') +
         `\nViết 2-3 câu tiếng Việt giải thích NGẮN GỌN vì sao chọn đúng các con số này. Không liệt kê phương án khác, không đổi số.`;
       sourceTag = 'SK';
+    } else if (method === 'ICT') {
+      // ============ ICT: quét thanh khoản + Killzone + Premium/Discount ============
+      // Dùng LẠI ĐÚNG hàm đã chạy backtest (decideIctSetup) thay vì viết lại — để logic chạy thật và
+      // logic được đo lường không bao giờ lệch nhau. Đây là bài học rút ra từ chính dự án này: trước
+      // đây Backtest và Setup lệnh dùng hai bộ công thức khác nhau nên mọi con số backtest đều vô nghĩa.
+      const ictRaw = decideIctSetup(h1);
+      if (!ictRaw) {
+        return {
+          noTrade: true,
+          reason:
+            'Chưa đủ điều kiện ICT: cần đồng thời (1) đang trong Killzone London 07-10h hoặc New York 12-15h giờ UTC, ' +
+            '(2) giá nằm đúng nửa Discount (để BUY) hoặc Premium (để SELL) của dealing range, ' +
+            '(3) vừa có cú quét thủng đáy/đỉnh cũ rồi đóng cửa ngược lại, và (4) giá chưa hồi qua mốc vào lệnh OTE 0.705. Đứng ngoài chờ.',
+        };
+      }
+      // ICT tự xác định hướng từ xu hướng H1 + vị trí Premium/Discount, không nhận hướng ép từ ngoài.
+      // Nếu người dùng chọn tay ngược lại thì phải từ chối, không được ghi setup với hướng sai lệch.
+      if (ictRaw.direction !== direction) {
+        return {
+          noTrade: true,
+          reason: `Bạn chọn ${direction} nhưng cấu trúc ICT hiện tại chỉ cho tín hiệu ${ictRaw.direction} (theo xu hướng H1 và vị trí Premium/Discount). Không tạo setup ngược tín hiệu.`,
+        };
+      }
+      // Quy các mức về hệ giá spot hiện tại (giống các nhánh khác)
+      entry = ictRaw.entry + offM;
+      sl = ictRaw.sl + offM;
+      tp = ictRaw.tp + offM;
+      rr = ictRaw.rr;
+      const ictDir = ictRaw.direction;
+
+      templateReason =
+        `⚠️ CẢNH BÁO: phương pháp ICT này ĐÃ ĐƯỢC KIỂM CHỨNG BẰNG BACKTEST TRÊN DỮ LIỆU THẬT VÀ CHO KẾT QUẢ LỖ trên mọi khung thời gian. ` +
+        `Setup dưới đây chỉ để tham khảo/học tập, KHÔNG nên dùng để vào lệnh tiền thật. ` +
+        `Cấu trúc H1 ${trendClause}. ` +
+        `Giá vừa quét thủng mốc thanh khoản cũ rồi đóng cửa ngược lại (stop hunt) trong Killzone, và đang ở nửa ${ictDir === 'BUY' ? 'Discount (dưới trung điểm)' : 'Premium (trên trung điểm)'} của dealing range. ` +
+        `Chờ giá hồi về mốc OTE 0.705 tại ${entry.toFixed(2)} để vào ${ictDir}. ` +
+        `Stop Loss ngoài điểm quét tại ${sl.toFixed(2)} (nới tối thiểu 1.5×ATR). ` +
+        `Take Profit tại vùng thanh khoản đối diện ${tp.toFixed(2)}, tỷ lệ Risk:Reward 1:${rr}.` + warnClause;
+
+      aiSystemMsg =
+        'Bạn là chuyên gia phân tích ICT viết tiếng Việt. Nhiệm vụ DUY NHẤT: diễn giải lại một quyết định giao dịch ĐÃ CÓ SẴN thành 2-3 câu. ' +
+        'BẮT BUỘC nêu rõ ngay câu đầu rằng phương pháp này đã backtest ra kết quả LỖ và chỉ mang tính tham khảo. ' +
+        'TUYỆT ĐỐI không đề xuất số liệu khác, không đổi entry/SL/TP đã cho.';
+      aiUserMsg =
+        `Setup đã được thuật toán ICT chốt — các con số là CUỐI CÙNG, không được đổi:\n` +
+        `- Hướng: ${ictDir}\n- Entry: ${entry.toFixed(2)} (OTE 0.705 sau cú quét thanh khoản)\n` +
+        `- Stop Loss: ${sl.toFixed(2)} (ngoài điểm quét)\n- Take Profit: ${tp.toFixed(2)} (vùng thanh khoản đối diện)\n- RR: 1:${rr}\n` +
+        `- Xu hướng H1: ${h1Trend ?? 'chưa xác định rõ'}\n` +
+        `- BẮT BUỘC: nêu rõ phương pháp ICT này đã được backtest và cho kết quả LỖ, chỉ nên dùng để tham khảo.\n` +
+        `\nViết 2-3 câu tiếng Việt ngắn gọn. Không liệt kê phương án khác, không đổi số.`;
+      sourceTag = 'ICT';
     } else {
       // ============ Phương pháp SMC (Smart Money Concept): cấu trúc, Order Block, FVG, thanh khoản ============
       // Đây là engine đã xây cho Giai đoạn 3 (trang SMC) — giờ tái dùng cho Setup lệnh thay vì chỉ

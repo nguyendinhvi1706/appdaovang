@@ -123,7 +123,9 @@ export class TelegramService implements OnModuleInit {
     const chatId = await this.chatIdOf(userId);
     if (!chatId) return;
     const dirIcon = setup.direction === 'BUY' ? '🟢 BUY' : '🔴 SELL';
-    const methodLabel = setup.source.startsWith('SK') ? 'SK System (Fibonacci)' : setup.source.startsWith('SMC') ? 'SMC (Order Block/FVG)' : setup.source;
+    const methodLabel = setup.source.startsWith('SK') ? 'SK System (Fibonacci)'
+      : setup.source.startsWith('ICT') ? 'ICT (quét thanh khoản + Killzone) ⚠️ backtest cho kết quả LỖ'
+      : setup.source.startsWith('SMC') ? 'SMC (Order Block/FVG)' : setup.source;
     const reasonShort = this.esc(setup.reasoning).slice(0, 400);
     const text =
       `🆕 <b>SETUP MỚI — ${this.esc(setup.symbol)}</b>\n` +

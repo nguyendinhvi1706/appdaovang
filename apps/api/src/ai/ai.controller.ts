@@ -15,8 +15,8 @@ class CreateSetupDto {
   @IsOptional() @IsIn(['AUTO', 'BUY', 'SELL'])
   direction?: 'AUTO' | 'BUY' | 'SELL';
 
-  @IsOptional() @IsIn(['SMC', 'SK'])
-  method?: 'SMC' | 'SK';
+  @IsOptional() @IsIn(['SMC', 'SK', 'ICT'])
+  method?: 'SMC' | 'SK' | 'ICT';
 }
 
 @UseGuards(JwtAuthGuard)
