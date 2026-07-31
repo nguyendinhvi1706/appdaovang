@@ -1,11 +1,11 @@
 import { Candle } from '../market/market.service';
 import { detectStructure, detectSwings } from '../smc/smc.engine';
 import { detectCyclicalExtremes, fisherTransform } from '../ai/indicators';
-import { decideLiveSetup } from './live-setup.strategy';
+import { decideIctSetup, decideLiveSetup } from './live-setup.strategy';
 
 export type StrategyId =
   | 'ema_cross' | 'rsi_reversion' | 'smc_bos' | 'cyclical_extreme' | 'grid_369'
-  | 'live_smc' | 'live_sk';
+  | 'live_smc' | 'live_sk' | 'live_ict';
 
 export type BacktestConfig = {
   strategy: StrategyId;
@@ -175,7 +175,7 @@ function buildSignals(c: Candle[], cfg: BacktestConfig): ('buy' | 'sell' | null)
 
 // ---------- Mô phỏng ----------
 export function runBacktest(c: Candle[], cfg: BacktestConfig): BacktestResult {
-  if (cfg.strategy === 'live_smc' || cfg.strategy === 'live_sk') {
+  if (cfg.strategy === 'live_smc' || cfg.strategy === 'live_sk' || cfg.strategy === 'live_ict') {
     return runLiveSetupBacktest(c, cfg);
   }
   const signals = buildSignals(c, cfg);
@@ -239,7 +239,10 @@ export function runBacktest(c: Candle[], cfg: BacktestConfig): BacktestResult {
  * chỉ khớp khi giá quay lại chạm entry, hết hạn thì huỷ — đúng như cách app đang chạy thật.
  */
 function runLiveSetupBacktest(c: Candle[], cfg: BacktestConfig): BacktestResult {
-  const method: 'SMC' | 'SK' = cfg.strategy === 'live_sk' ? 'SK' : 'SMC';
+  const method: 'SMC' | 'SK' | 'ICT' =
+    cfg.strategy === 'live_sk' ? 'SK' : cfg.strategy === 'live_ict' ? 'ICT' : 'SMC';
+  const decide = (win: Candle[]) =>
+    method === 'ICT' ? decideIctSetup(win) : decideLiveSetup(win, method);
   const WINDOW = 500;      // số nến quá khứ dùng để phân tích, khớp giới hạn của bản live
   const WARMUP = 120;      // đủ nến để dựng H1 (÷4) và EMA50 trên H1
   const PENDING_BARS = 96; // lệnh chờ quá 96 nến (~1 ngày trên M15) mà chưa khớp thì huỷ
@@ -300,7 +303,7 @@ function runLiveSetupBacktest(c: Candle[], cfg: BacktestConfig): BacktestResult 
 
     // 3) Rảnh tay (không lệnh chạy, không lệnh chờ) → tìm setup mới trên đúng dữ liệu ĐÃ ĐÓNG
     if (!pos && !pending && balance > 0) {
-      const setup = decideLiveSetup(c.slice(Math.max(0, i - WINDOW + 1), i + 1), method);
+      const setup = decide(c.slice(Math.max(0, i - WINDOW + 1), i + 1));
       if (setup) {
         pending = {
           direction: setup.direction, entry: setup.entry, sl: setup.sl, tp: setup.tp,

@@ -20,6 +20,7 @@ type Result = {
     stdDevR?: number;
   };
   periodDays?: number;
+  split?: { firstHalf: HalfStat; secondHalf: HalfStat };
 };
 
 /** Khoảng tin cậy 95% của kỳ vọng R — cho biết kết quả có phân biệt được với "vô dụng" hay không.
@@ -45,7 +46,10 @@ const strategyLabels: Record<string, string> = {
   ema_cross: 'EMA Cross', rsi_reversion: 'RSI đảo chiều', smc_bos: 'SMC BOS',
   cyclical_extreme: 'Cyclical Extreme (Fisher)', grid_369: 'Lưới 369 (kiểm chứng)',
   live_smc: '⭐ Setup lệnh thật — SMC', live_sk: '⭐ Setup lệnh thật — SK System',
+  live_ict: '⭐ ICT (quét thanh khoản + Killzone)',
 };
+
+type HalfStat = { trades: number; winRate: number; expectancyR: number; profitFactor: number | null };
 
 export default function BacktestPage() {
   const [form, setForm] = useState({ ...defaults });
@@ -183,8 +187,18 @@ export default function BacktestPage() {
             <option value="grid_369">Lưới 369 (kiểm chứng)</option>
             <option value="live_smc">⭐ Setup lệnh thật — SMC</option>
             <option value="live_sk">⭐ Setup lệnh thật — SK System</option>
+            <option value="live_ict">⭐ ICT (quét thanh khoản + Killzone)</option>
           </select>
         </label>
+        {form.strategy === 'live_ict' && (
+          <p className="sm:col-span-3 text-xs text-slate-400 leading-relaxed">
+            <b>ICT</b> — khác SMC ở chỗ không chờ giá chạm Order Block, mà chờ giá <b>quét thủng đáy/đỉnh cũ
+            rồi bật ngược lại</b> (stop hunt). Kèm 2 bộ lọc riêng của ICT: chỉ vào lệnh trong{' '}
+            <b>Killzone</b> (London 07–10h, New York 12–15h giờ UTC) và chỉ BUY ở nửa dưới / SELL ở nửa
+            trên của dealing range (<b>Premium/Discount</b>). Entry tại mốc OTE 0.705.
+            Vì lọc theo giờ nên số lệnh sẽ ít hơn hẳn — cần độ sâu dữ liệu lớn.
+          </p>
+        )}
         {(form.strategy === 'live_smc' || form.strategy === 'live_sk') && (
           <p className="sm:col-span-3 text-xs text-slate-400 leading-relaxed">
             Chạy đúng thuật toán mà mục <b>Setup lệnh</b> đang dùng thật: entry chờ retest{' '}
@@ -270,6 +284,43 @@ export default function BacktestPage() {
                     : ci.lo > 0
                       ? '✅ Khoảng này nằm hoàn toàn trên 0 — kỳ vọng dương khó giải thích bằng may rủi. Vẫn cần kiểm chứng ngoài mẫu trước khi tin dùng thật.'
                       : '❌ Khoảng này nằm hoàn toàn dưới 0 — chiến lược lỗ một cách có hệ thống, không phải xui.'}
+                </div>
+              </div>
+            );
+          })()}
+          {result.split && (result.split.firstHalf.trades > 1 || result.split.secondHalf.trades > 1) && (() => {
+            const a = result.split.firstHalf, b = result.split.secondHalf;
+            const bothPositive = a.expectancyR > 0 && b.expectancyR > 0;
+            const flipped = a.expectancyR > 0 && b.expectancyR <= 0;
+            return (
+              <div className={`card mb-4 border ${bothPositive ? 'border-green-500/40' : flipped ? 'border-red-500/40' : 'border-slate-600'}`}>
+                <div className="text-xs text-gray-400 mb-2">
+                  Kiểm chứng ngoài mẫu — chia đôi dữ liệu theo thời gian
+                </div>
+                <table className="w-full text-sm">
+                  <thead className="text-xs text-gray-400">
+                    <tr><th className="text-left font-normal">Giai đoạn</th><th>Lệnh</th><th>Win</th><th>PF</th><th>Kỳ vọng</th></tr>
+                  </thead>
+                  <tbody>
+                    {([['Nửa đầu (dùng để tìm/chỉnh)', a], ['Nửa sau (kiểm chứng thật)', b]] as const).map(([label, h]) => (
+                      <tr key={label} className="border-t border-slate-700/60">
+                        <td className="py-1">{label}</td>
+                        <td className="text-center">{h.trades}</td>
+                        <td className="text-center">{h.winRate}%</td>
+                        <td className="text-center">{h.profitFactor ?? '∞'}</td>
+                        <td className={`text-center font-bold ${h.expectancyR > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {h.expectancyR > 0 ? '+' : ''}{h.expectancyR}R
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="text-xs text-gray-400 mt-2 leading-relaxed">
+                  {flipped
+                    ? '❌ Nửa đầu lãi nhưng nửa sau lỗ — dấu hiệu điển hình của việc khớp nhiễu quá khứ (overfitting). Đừng tin kết quả tổng.'
+                    : bothPositive
+                      ? '✅ Dương ở CẢ HAI nửa — đây là điều kiện tối thiểu để một lợi thế đáng được xem xét (chưa phải bằng chứng đủ).'
+                      : 'Kết quả trái chiều hoặc âm — chưa có dấu hiệu của lợi thế bền vững.'}
                 </div>
               </div>
             );
