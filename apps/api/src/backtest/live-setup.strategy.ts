@@ -78,91 +78,124 @@ function enforceMinStop(entry: number, sl: number, bull: boolean, minDist: numbe
 }
 
 /**
- * ================== ICT (Inner Circle Trader) ==================
- * Khác biệt CỐT LÕI so với SMC ở trên: SMC chờ giá quay lại chạm rìa Order Block/FVG (mua vào vùng
- * "tổ chức đã để lại dấu"). ICT làm ngược: chờ giá QUÉT THỦNG đáy/đỉnh cũ để gom thanh khoản (stop
- * hunt) rồi bật ngược trở lại — tức vào lệnh SAU khi lệnh cắt lỗ của đám đông vừa bị quét sạch.
+ * ================== ICT (Inner Circle Trader) — mô hình đầy đủ ==================
+ * Bản trước quá sơ sài: chỉ bắt "quét thanh khoản rồi vào lệnh tại OTE", bỏ mất khâu quan trọng
+ * nhất nên mọi cú quét do nhiễu cũng bị tính là tín hiệu. Bản này dựng đúng chuỗi kinh điển:
  *
- * Ba thành phần ICT mà bản SMC hiện tại KHÔNG có:
- *  1. Liquidity sweep: nến thủng swing low/high cũ nhưng ĐÓNG CỬA trở lại bên trong → tín hiệu quét.
- *  2. Killzone: chỉ giao dịch trong giờ London (07-10 UTC) hoặc New York (12-15 UTC) — khung giờ có
- *     thanh khoản và biến động thật, tránh phiên Á lình xình.
- *  3. Premium/Discount: chỉ BUY khi giá ở nửa DƯỚI, chỉ SELL khi ở nửa TRÊN của dealing range.
- *     (Engine đã có sẵn dealingRange nhưng nhánh SMC chưa hề dùng — đây là thiếu sót thật.)
+ *   Bias khung lớn → Quét thanh khoản (sweep) → DISPLACEMENT phá cấu trúc (MSS)
+ *   → FVG do chính cú đẩy đó tạo ra → vào lệnh tại CE (giữa FVG) → SL ngoài điểm quét
+ *   → TP tại thanh khoản đối diện
  *
- * Entry dùng OTE (Optimal Trade Entry) 0.705 — mốc hồi quy kinh điển của ICT, cùng họ với 0.618 mà
- * SK System đang dùng.
+ * Ba khâu bản cũ THIẾU và là lý do setup ra rác:
+ *  1. DISPLACEMENT — cú đẩy sau sweep phải đủ mạnh (≥1.5×ATR) chứ không phải nhích nhẹ.
+ *  2. MSS (Market Structure Shift) — cú đẩy đó phải PHÁ được swing ngược chiều gần nhất. Không phá
+ *     được nghĩa là cấu trúc chưa đổi, cú quét chỉ là nhiễu.
+ *  3. Entry tại FVG của cú đẩy — đây mới là điểm vào chuẩn ICT. Không có FVG thì không có dấu vết
+ *     mất cân bằng, tức không có cơ sở để chờ giá quay lại.
+ *
+ * Kèm các bộ lọc: Killzone (London 07-10, New York 12-15 UTC) và Premium/Discount (chỉ BUY nửa
+ * dưới, SELL nửa trên của dealing range).
  */
 function inKillzone(timeSec: number): boolean {
   const h = new Date(timeSec * 1000).getUTCHours();
   return (h >= 7 && h < 10) || (h >= 12 && h < 15);
 }
 
+/** FVG (khoảng mất cân bằng 3 nến) tạo ra trong đoạn [from..to], CHƯA bị giá lấp tính tới nến cuối */
+function findFreshFvg(
+  c: Candle[], from: number, to: number, bull: boolean,
+): { top: number; bottom: number } | null {
+  const out: { top: number; bottom: number; at: number }[] = [];
+  for (let j = Math.max(2, from); j <= to && j < c.length; j++) {
+    if (bull && c[j].low > c[j - 2].high) out.push({ top: c[j].low, bottom: c[j - 2].high, at: j });
+    if (!bull && c[j].high < c[j - 2].low) out.push({ top: c[j - 2].low, bottom: c[j].high, at: j });
+  }
+  // Loại FVG đã bị giá lấp — phải kiểm tra từ nến NGAY SAU khi FVG hình thành (z.at) cho tới hiện
+  // tại. Trước đây kiểm tra từ `to + 1` mà `to` lại là nến cuối, nên vòng lặp không bao giờ chạy và
+  // mọi FVG đều bị coi là còn nguyên — kể cả những khoảng đã bị lấp từ lâu, mất hết ý nghĩa.
+  const alive = out.filter((z) => {
+    for (let k = z.at + 1; k < c.length; k++) {
+      if (bull ? c[k].low <= z.bottom : c[k].high >= z.top) return false;
+    }
+    return true;
+  });
+  if (!alive.length) return null;
+  // Lấy FVG gần cú quét nhất (chiết khấu sâu nhất cho BUY / cao nhất cho SELL)
+  return alive.sort((a, b) => (bull ? a.bottom - b.bottom : b.top - a.top))[0];
+}
+
 export function decideIctSetup(window: Candle[]): LiveSetup | null {
-  if (window.length < 60) return null;
+  if (window.length < 80) return null;
   const m15 = window;
-  const last = m15[m15.length - 1];
+  const n = m15.length;
+  const last = m15[n - 1];
   const spot = last.close;
-  if (!inKillzone(last.time)) return null; // ngoài killzone → đứng ngoài
+  if (!inKillzone(last.time)) return null;
 
   const aRef = atrOf(m15) ?? spot * 0.005;
   const minSlDist = Math.max(aRef * 1.5, spot * 0.001);
   const swings = detectSwings(m15);
-  if (swings.length < 4) return null;
+  if (swings.length < 6) return null;
 
-  // --- Xu hướng khung lớn (H1) làm thiên hướng, giống các phương pháp khác ---
+  // --- Bias khung lớn (H1) ---
   const h1 = aggregateBy(m15, 4);
-  const h1Structure = detectStructure(h1, detectSwings(h1));
-  const lastH1Event = h1Structure[h1Structure.length - 1] ?? null;
-  const h1Closes = h1.map((x) => x.close);
-  const e20 = emaOf(h1Closes, 20), e50 = emaOf(h1Closes, 50);
-  const trend = lastH1Event
-    ? (lastH1Event.direction === 'bull' ? 'TĂNG' : 'GIẢM')
+  const h1Struct = detectStructure(h1, detectSwings(h1));
+  const lastEv = h1Struct[h1Struct.length - 1] ?? null;
+  const closes = h1.map((x) => x.close);
+  const e20 = emaOf(closes, 20), e50 = emaOf(closes, 50);
+  const trend = lastEv
+    ? (lastEv.direction === 'bull' ? 'TĂNG' : 'GIẢM')
     : (e20 != null && e50 != null ? (e20 >= e50 ? 'TĂNG' : 'GIẢM') : null);
   if (!trend) return null;
   const bull = trend === 'TĂNG';
 
-  // --- Lọc Premium/Discount: chỉ mua ở nửa dưới, bán ở nửa trên của dealing range ---
+  // --- Premium/Discount ---
   const dr = dealingRange(m15, swings);
   if (!dr) return null;
   if (bull && spot >= dr.eq) return null;
   if (!bull && spot <= dr.eq) return null;
 
-  // --- Tìm cú quét thanh khoản gần nhất (trong 12 nến đổ lại) ---
-  const LOOKBACK = 12;
-  const startIdx = Math.max(0, m15.length - LOOKBACK);
-  let sweepIdx = -1, sweptLevel = 0;
-  for (let i = m15.length - 1; i >= startIdx; i--) {
-    // Mốc thanh khoản = swing đã hình thành TRƯỚC nến đang xét (không nhìn trước)
-    const prior = swings.filter((s) => s.index < i - 2 && s.kind === (bull ? 'low' : 'high'));
-    if (!prior.length) continue;
+  // --- 1) Quét thanh khoản: thủng swing cũ rồi ĐÓNG CỬA trở lại bên trong ---
+  const SWEEP_LOOKBACK = 24;
+  let sweepIdx = -1, sweepExtreme = 0;
+  for (let i = n - 1; i >= Math.max(0, n - SWEEP_LOOKBACK); i--) {
+    const prior = swings.filter((s) => s.index <= i - 3 && s.kind === (bull ? 'low' : 'high'));
+    if (prior.length < 2) continue;
     const level = bull
-      ? Math.min(...prior.slice(-5).map((s) => s.price))
-      : Math.max(...prior.slice(-5).map((s) => s.price));
+      ? Math.min(...prior.slice(-6).map((s) => s.price))
+      : Math.max(...prior.slice(-6).map((s) => s.price));
     const swept = bull
-      ? m15[i].low < level && m15[i].close > level   // thủng đáy rồi đóng cửa lại phía trên
-      : m15[i].high > level && m15[i].close < level; // thủng đỉnh rồi đóng cửa lại phía dưới
-    if (swept) { sweepIdx = i; sweptLevel = level; break; }
+      ? m15[i].low < level && m15[i].close > level
+      : m15[i].high > level && m15[i].close < level;
+    if (swept) { sweepIdx = i; sweepExtreme = bull ? m15[i].low : m15[i].high; break; }
   }
-  if (sweepIdx < 0) return null;
+  if (sweepIdx < 0 || sweepIdx >= n - 2) return null; // cần ít nhất vài nến sau sweep để có cú đẩy
 
-  // --- Chân đẩy sau cú quét: từ điểm cực trị của nến quét tới cực trị ngược lại tới hiện tại ---
+  // --- 2) Displacement: cú đẩy sau sweep phải đủ mạnh ---
   const after = m15.slice(sweepIdx);
-  const legStart = bull ? Math.min(...after.map((c) => c.low)) : Math.max(...after.map((c) => c.high));
   const legEnd = bull ? Math.max(...after.map((c) => c.high)) : Math.min(...after.map((c) => c.low));
-  const legSize = Math.abs(legEnd - legStart);
-  if (legSize < aRef) return null; // chân đẩy quá yếu, chưa đáng tin
+  const displacement = Math.abs(legEnd - sweepExtreme);
+  if (displacement < aRef * 1.5) return null; // nhích nhẹ, không phải displacement
 
-  // Entry tại OTE 0.705 (hồi 70.5% chân đẩy) — phải nằm phía chưa tới so với giá hiện tại
-  const entry = bull ? legEnd - 0.705 * legSize : legEnd + 0.705 * legSize;
-  if (bull ? entry >= spot : entry <= spot) return null; // giá đã hồi qua vùng vào lệnh
+  // --- 3) MSS: cú đẩy phải PHÁ swing ngược chiều gần nhất trước cú quét ---
+  const opposing = swings.filter((s) => s.index < sweepIdx && s.kind === (bull ? 'high' : 'low'));
+  if (!opposing.length) return null;
+  const mssLevel = opposing[opposing.length - 1].price;
+  const brokeStructure = bull ? legEnd > mssLevel : legEnd < mssLevel;
+  if (!brokeStructure) return null; // cấu trúc chưa đổi → cú quét chỉ là nhiễu
+
+  // --- 4) Entry tại CE (giữa) của FVG do cú đẩy tạo ra ---
+  const fvg = findFreshFvg(m15, sweepIdx, n - 1, bull);
+  if (!fvg) return null;
+  const entry = (fvg.top + fvg.bottom) / 2;
+  if (bull ? entry >= spot : entry <= spot) return null; // giá đã đi qua vùng vào lệnh
 
   const buffer = aRef * 0.5;
-  const sl = enforceMinStop(entry, bull ? legStart - buffer : legStart + buffer, bull, minSlDist);
+  const sl = enforceMinStop(entry, bull ? sweepExtreme - buffer : sweepExtreme + buffer, bull, minSlDist);
   const slDist = Math.abs(entry - sl);
   if (slDist <= 0) return null;
 
-  // --- TP: vùng thanh khoản đối diện gần nhất đạt RR hợp lý, nếu không có thì RR 1:2.5 ---
+  // --- 5) TP: thanh khoản đối diện gần nhất đạt RR hợp lý ---
   const minRR = 1.5, maxRR = 5;
   const liq = detectEqualLevels(m15, swings)
     .filter((e) => (bull ? e.price > entry : e.price < entry))
@@ -177,6 +210,7 @@ export function decideIctSetup(window: Candle[]): LiveSetup | null {
     rr: +(Math.abs(tp - entry) / slDist).toFixed(2),
   };
 }
+
 
 /**
  * Trả về setup (entry/SL/TP/RR) theo đúng thuật toán live, hoặc null nếu "đứng ngoài".
@@ -249,8 +283,18 @@ export function decideLiveSetup(window: Candle[], method: 'SMC' | 'SK'): LiveSet
 
   const obs = detectOrderBlocks(m15, m15Structure).filter((z) => !z.mitigated).filter(sizeable);
   const fvgs = detectFVG(m15).filter((z) => !z.mitigated).filter(sizeable);
-  const obCand = obs.filter(dirMatch).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
-  const fvgCand = fvgs.filter(dirMatch).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
+  // Lọc Premium/Discount — quy tắc gốc của SMC/ICT mà nhánh này TRƯỚC ĐÂY BỎ QUÊN hoàn toàn: chỉ
+  // mua ở nửa dưới (discount) và bán ở nửa trên (premium) của dealing range. Không có bộ lọc này,
+  // thuật toán sẵn sàng mua ngay đỉnh miễn là có Order Block gần đó — sai hẳn tinh thần phương pháp.
+  const drSmc = dealingRange(m15, m15Swings);
+  const inRightHalf = (z: Zone) => {
+    if (!drSmc) return true;
+    const zonePrice = bull ? z.top : z.bottom;
+    return bull ? zonePrice < drSmc.eq : zonePrice > drSmc.eq;
+  };
+
+  const obCand = obs.filter(dirMatch).filter(inRightHalf).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
+  const fvgCand = fvgs.filter(dirMatch).filter(inRightHalf).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
   const zone = obCand[0] ?? fvgCand[0] ?? null;
   if (!zone) return null;
 
