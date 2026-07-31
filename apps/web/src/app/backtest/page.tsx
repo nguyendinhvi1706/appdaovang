@@ -18,14 +18,28 @@ type Result = {
     expectancyR: number; expectancyUsd: number; maxDrawdownPct: number;
     maxLoseStreak: number; avgWinUsd: number; avgLossUsd: number;
   };
+  periodDays?: number;
 };
+
+/** Khoảng tin cậy 95% của kỳ vọng R — cho biết kết quả có phân biệt được với "vô dụng" hay không.
+ *  Đây là thứ quan trọng hơn winrate: nếu khoảng này còn chứa số 0 thì cỡ mẫu chưa đủ để kết luận,
+ *  dù lợi nhuận hiển thị có đẹp đến đâu (vài lệnh may mắn cũng cho profit factor rất cao). */
+function confidence(n: number, expR: number, wins: number) {
+  if (n < 2) return null;
+  const losses = n - wins;
+  const vals = [...Array(wins).fill(2.0), ...Array(losses).fill(-1.0)];
+  const m = vals.reduce((a, b) => a + b, 0) / n;
+  const sd = Math.sqrt(vals.reduce((s, v) => s + (v - m) ** 2, 0) / Math.max(1, n - 1));
+  const se = sd / Math.sqrt(n);
+  return { lo: expR - 1.96 * se, hi: expR + 1.96 * se };
+}
 
 const defaults = {
   symbol: 'XAUUSD', interval: '1h', strategy: 'ema_cross',
   emaFast: 9, emaSlow: 21, rsiPeriod: 14, rsiLower: 30, rsiUpper: 70,
   atrPeriod: 14, slAtrMult: 1.5, rr: 2, riskPercent: 1, initialBalance: 1000,
   fisherPeriod: 10, fisherThreshold: 1.2,
-  grid369Unit: 100, grid369Anchor: 0,
+  grid369Unit: 100, grid369Anchor: 0, maxBars: 20000,
 };
 
 const strategyLabels: Record<string, string> = {
@@ -206,6 +220,15 @@ export default function BacktestPage() {
         <label>RR (TP)<input className="input mt-1" type="number" step="0.5" value={form.rr} onChange={(e) => set('rr', +e.target.value)} /></label>
         <label>Risk %<input className="input mt-1" type="number" step="0.5" value={form.riskPercent} onChange={(e) => set('riskPercent', +e.target.value)} /></label>
         <label>Vốn ban đầu<input className="input mt-1" type="number" value={form.initialBalance} onChange={(e) => set('initialBalance', +e.target.value)} /></label>
+        <label title="Số nến lịch sử nạp về. Càng nhiều → càng nhiều lệnh → kết luận càng đáng tin. Lần chạy đầu ở mức sâu có thể mất 10-30 giây.">
+          Độ sâu dữ liệu
+          <select className="input mt-1" value={form.maxBars} onChange={(e) => set('maxBars', +e.target.value)}>
+            <option value={500}>500 nến (nhanh, KHÔNG đủ kết luận)</option>
+            <option value={5000}>5.000 nến</option>
+            <option value={20000}>20.000 nến (khuyên dùng, ~30 giây lần đầu)</option>
+            <option value={50000}>50.000 nến (có thể quá lâu, dễ lỗi)</option>
+          </select>
+        </label>
         <div className="flex items-end gap-2">
           <button className="btn w-full" onClick={run} disabled={loading}>{loading ? 'Đang chạy...' : '▶ Chạy backtest'}</button>
           {result && (
@@ -228,6 +251,30 @@ export default function BacktestPage() {
               </div>
             ))}
           </div>
+          {(() => {
+            const ci = confidence(s!.totalTrades, s!.expectancyR, s!.wins);
+            if (!ci) return null;
+            const inconclusive = ci.lo < 0 && ci.hi > 0;
+            return (
+              <div className={`card mb-4 border ${inconclusive ? 'border-amber-500/40' : 'border-green-500/40'}`}>
+                <div className="text-xs text-gray-400">Độ tin cậy thống kê — {s!.totalTrades} lệnh
+                  {result.periodDays ? ` trên ${result.periodDays} ngày dữ liệu` : ''}</div>
+                <div className="text-sm mt-1">
+                  Khoảng tin cậy 95% của kỳ vọng:{' '}
+                  <b className={inconclusive ? 'text-amber-400' : 'text-green-400'}>
+                    [{ci.lo.toFixed(2)}R , {ci.hi.toFixed(2)}R]
+                  </b>
+                </div>
+                <div className="text-xs text-gray-400 mt-1 leading-relaxed">
+                  {inconclusive
+                    ? '⚠️ Khoảng này CHỨA số 0 — cỡ mẫu chưa đủ để phân biệt chiến lược này với một chiến lược vô dụng. Lợi nhuận hiển thị (dù dương hay âm) có thể hoàn toàn do may rủi. Hãy tăng độ sâu dữ liệu để có nhiều lệnh hơn trước khi kết luận.'
+                    : ci.lo > 0
+                      ? '✅ Khoảng này nằm hoàn toàn trên 0 — kỳ vọng dương khó giải thích bằng may rủi. Vẫn cần kiểm chứng ngoài mẫu trước khi tin dùng thật.'
+                      : '❌ Khoảng này nằm hoàn toàn dưới 0 — chiến lược lỗ một cách có hệ thống, không phải xui.'}
+                </div>
+              </div>
+            );
+          })()}
           <div className="card p-0 overflow-hidden mb-4"><div ref={priceRef} /></div>
           <div className="text-sm text-gray-400 mb-1">Đường vốn (Equity)</div>
           <div className="card p-0 overflow-hidden mb-4"><div ref={equityRef} /></div>

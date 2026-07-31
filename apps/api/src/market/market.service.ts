@@ -245,6 +245,82 @@ export class MarketService {
     return this.candlesRaw(symbol, interval);
   }
 
+  /**
+   * Nến LỊCH SỬ SÂU cho Backtest — lấy nhiều tháng/nhiều năm thay vì 500 nến như candles().
+   *
+   * Vì sao cần: với 500 nến, khung 15m chỉ được ~5 ngày nên mỗi lần backtest chỉ ra 2-9 lệnh —
+   * quá ít để kết luận bất cứ điều gì (khoảng tin cậy rộng hơn cả biên độ kỳ vọng). Muốn biết một
+   * chiến lược có lợi thế thật hay không cần cỡ 150-800 lệnh.
+   *
+   * Cách làm: Twelve Data cho tối đa 5000 nến/lần gọi, nên phân trang lùi dần theo `end_date` cho
+   * tới khi đủ `maxBars` hoặc hết dữ liệu. Có nghỉ giữa các lần gọi vì gói free giới hạn 8 lần/phút.
+   * Kết quả cache 30 phút (backtest hay chạy lại nhiều lần với cùng bộ dữ liệu).
+   */
+  deepCandles(
+    symbol: string,
+    interval: '5m' | '15m' | '30m' | '1h' | '4h' | '1d' = '15m',
+    maxBars = 20000,
+  ): Promise<Candle[]> {
+    return this.cached(`deep:${symbol}:${interval}:${maxBars}`, 30 * 60_000, async () => {
+      const apikey = process.env.TWELVEDATA_API_KEY;
+      const clean = symbol.replace('=X', '').toUpperCase();
+      // Không có key hoặc không phải cặp 6 ký tự → giữ nguyên hành vi cũ (500 nến)
+      if (!apikey || !/^[A-Z]{6}$/.test(clean)) return this.candles(symbol, interval);
+
+      const pair = `${clean.slice(0, 3)}/${clean.slice(3)}`;
+      const intervalMap: Record<string, string> = { '5m': '5min', '15m': '15min', '30m': '30min', '1h': '1h', '4h': '4h', '1d': '1day' };
+      const tdInterval = intervalMap[interval];
+      const PAGE = 5000; // giới hạn mỗi lần gọi của Twelve Data
+
+      const all: Candle[] = [];
+      let endDate: string | null = null; // null = mới nhất
+      for (let page = 0; page < Math.ceil(maxBars / PAGE) + 2 && all.length < maxBars; page++) {
+        const params = [
+          `symbol=${encodeURIComponent(pair)}`,
+          `interval=${tdInterval}`,
+          `outputsize=${PAGE}`,
+          'timezone=UTC',
+          `apikey=${apikey}`,
+          ...(endDate ? [`end_date=${encodeURIComponent(endDate)}`] : []),
+        ].join('&');
+        try {
+          const res = await fetch(`https://api.twelvedata.com/time_series?${params}`);
+          if (!res.ok) { console.warn(`[deepCandles] ${pair} trang ${page}: HTTP ${res.status}`); break; }
+          const json: any = await res.json();
+          if (json?.status === 'error' || !Array.isArray(json?.values) || !json.values.length) {
+            if (page === 0) console.warn(`[deepCandles] ${pair}: ${json?.message ?? 'không có dữ liệu'}`);
+            break;
+          }
+          const page1: Candle[] = json.values
+            .map((v: any) => ({
+              time: Math.floor(new Date(v.datetime.replace(' ', 'T') + 'Z').getTime() / 1000),
+              open: +v.open, high: +v.high, low: +v.low, close: +v.close,
+            }))
+            .reverse(); // Twelve Data trả mới nhất trước
+          all.unshift(...page1);
+
+          // Trang sau lấy khoảng thời gian TRƯỚC nến cũ nhất vừa nhận
+          const oldest = page1[0];
+          if (!oldest) break;
+          endDate = new Date((oldest.time - 1) * 1000).toISOString().slice(0, 19).replace('T', ' ');
+          if (json.values.length < PAGE) break; // đã hết lịch sử
+          await new Promise((r) => setTimeout(r, 8_000)); // né giới hạn 8 request/phút của gói free
+        } catch (e: any) {
+          console.warn(`[deepCandles] ${pair} trang ${page}: ${e.message}`);
+          break;
+        }
+      }
+      if (!all.length) return this.candles(symbol, interval);
+
+      // Khử trùng lặp giữa các trang + sắp xếp + lọc nến giả cuối tuần (giống candlesRaw)
+      const seen = new Set<number>();
+      const merged = all
+        .sort((a, b) => a.time - b.time)
+        .filter((c) => (seen.has(c.time) ? false : (seen.add(c.time), true)));
+      return this.stripSyntheticCandles(merged).slice(-maxBars);
+    });
+  }
+
   /** true nếu ticker là hợp đồng tương lai (basis trôi theo thời gian, không phải giá spot thật) */
   static isFuturesTicker(ticker: string | null): boolean {
     return !!ticker && /=F$/.test(ticker);

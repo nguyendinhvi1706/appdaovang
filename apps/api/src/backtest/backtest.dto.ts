@@ -55,4 +55,10 @@ export class RunBacktestDto {
 
   @IsOptional() @Type(() => Number) @IsNumber() @Min(-1000000) @Max(1000000)
   grid369Anchor = 0;
+
+  // Số nến lịch sử tối đa nạp về để chạy (phân trang từ Twelve Data, 5000 nến/lần gọi). Càng nhiều
+  // nến → càng nhiều lệnh → kết luận càng đáng tin. Lần đầu chạy sâu sẽ mất thêm ~10-30 giây vì
+  // phải chờ giữa các lần gọi (gói free giới hạn 8 request/phút); sau đó có cache 30 phút.
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(500) @Max(50000)
+  maxBars = 20000;
 }
