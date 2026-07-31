@@ -243,8 +243,10 @@ function runLiveSetupBacktest(c: Candle[], cfg: BacktestConfig): BacktestResult 
     cfg.strategy === 'live_sk' ? 'SK' : cfg.strategy === 'live_ict' ? 'ICT' : 'SMC';
   const decide = (win: Candle[]) =>
     method === 'ICT' ? decideIctSetup(win) : decideLiveSetup(win, method);
-  const WINDOW = 500;      // số nến quá khứ dùng để phân tích, khớp giới hạn của bản live
-  const WARMUP = 120;      // đủ nến để dựng H1 (÷4) và EMA50 trên H1
+  // ICT cần cửa sổ dài hơn hẳn vì phải dựng khung H4 (gộp 16 nến) và Daily (gộp 96 nến) để xác
+  // định xu hướng khung lớn theo đúng quy trình — 500 nến M15 chỉ ra ~5 nến Daily, không đủ.
+  const WINDOW = cfg.strategy === 'live_ict' ? 2400 : 500;
+  const WARMUP = cfg.strategy === 'live_ict' ? 400 : 120; // đủ nến để dựng khung lớn + EMA50
   const PENDING_BARS = 96; // lệnh chờ quá 96 nến (~1 ngày trên M15) mà chưa khớp thì huỷ
 
   let balance = cfg.initialBalance;
