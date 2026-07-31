@@ -4,9 +4,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { MarketService } from '../market/market.service';
 import { TelegramService } from '../telegram/telegram.service';
 import { atr, Candle, ema, rsi, swingLevels } from './indicators';
-import { detectEqualLevels, detectFVG, detectOrderBlocks, detectStructure, detectSwings, Swing, Zone } from '../smc/smc.engine';
+import { detectStructure, detectSwings, Swing } from '../smc/smc.engine';
 // Dùng chung hàm với Backtest — bảo đảm logic chạy thật ĐÚNG BẰNG logic đã được đo lường
-import { decideIctSetup } from '../backtest/live-setup.strategy';
+import { decideIctSetup, decideLiveSetup } from '../backtest/live-setup.strategy';
 
 export type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
@@ -582,103 +582,49 @@ export class AiService implements OnModuleInit {
         `\nViết 2-3 câu tiếng Việt ngắn gọn. Không liệt kê phương án khác, không đổi số.`;
       sourceTag = 'ICT';
     } else {
-      // ============ Phương pháp SMC (Smart Money Concept): cấu trúc, Order Block, FVG, thanh khoản ============
-      // Đây là engine đã xây cho Giai đoạn 3 (trang SMC) — giờ tái dùng cho Setup lệnh thay vì chỉ
-      // dựa vào EMA cross. Lý do: EMA20/50 là trung bình cộng dồn nên luôn trễ và dễ cho tín hiệu
-      // "50-50" trong thị trường sideway; SMC bám theo hành động giá thật (nơi giá đảo chiều, nơi
-      // thanh khoản bị quét) nên cho điểm vào/ra cụ thể hơn — dù không có phương pháp nào đảm bảo
-      // thắng chắc, đây là khung phân tích có căn cứ rõ ràng hơn một đường trung bình đơn thuần.
-      // Lọc bỏ vùng quá nhỏ (< 10% ATR) — đây thường chỉ là nhiễu giá chứ không phải dấu vết tổ
-      // chức thật, nếu không lọc sẽ chọn nhầm vùng gần như trùng giá hiện tại, mất ý nghĩa "chờ retest".
-      const minZoneSize = aRef * 0.1;
-      const m15Structure = detectStructure(h1, m15Swings);
-      const shiftZone = (z: Zone) => ({ ...z, top: z.top + offM, bottom: z.bottom + offM });
-      const sizeable = (z: Zone) => z.top - z.bottom >= minZoneSize;
-      const unmitigatedOBs = detectOrderBlocks(h1, m15Structure).filter((z) => !z.mitigated).map(shiftZone).filter(sizeable);
-      const unmitigatedFVGs = detectFVG(h1).filter((z) => !z.mitigated).map(shiftZone).filter(sizeable);
-      const liquidity = detectEqualLevels(h1, m15Swings).map((e) => ({ ...e, price: e.price + offM }));
-
-      const smcText = [
-        'CẤU TRÚC SMC (khung M15, mức giá đã quy về spot):',
-        lastH1Event
-          ? `H1 ${eventAgeText} có tín hiệu ${lastH1Event.type} theo hướng ${lastH1Event.direction === 'bull' ? 'TĂNG' : 'GIẢM'} tại mốc ${(lastH1Event.price + offM).toFixed(2)} (đây là sự kiện phá cấu trúc gần nhất tìm được, không nhất thiết vừa xảy ra).`
-          : 'H1 chưa có phá cấu trúc (BOS/CHOCH) rõ ràng gần đây — dùng EMA làm căn cứ xu hướng tạm thời.',
-        unmitigatedOBs.length
-          ? `Order Block M15 chưa bị lấp (đã lọc bỏ vùng quá nhỏ/nhiễu): ${unmitigatedOBs.slice(-5).map((z) => `${z.direction === 'bull' ? 'Bullish' : 'Bearish'} [${z.bottom.toFixed(2)}-${z.top.toFixed(2)}]`).join(', ')}`
-          : 'Không có Order Block M15 nào còn hiệu lực và đủ lớn để đáng tin cậy.',
-        unmitigatedFVGs.length
-          ? `FVG M15 chưa bị lấp (đã lọc bỏ vùng quá nhỏ/nhiễu): ${unmitigatedFVGs.slice(-5).map((z) => `${z.direction === 'bull' ? 'Bullish' : 'Bearish'} [${z.bottom.toFixed(2)}-${z.top.toFixed(2)}]`).join(', ')}`
-          : 'Không có FVG M15 nào còn hiệu lực và đủ lớn để đáng tin cậy.',
-        liquidity.length
-          ? `Vùng thanh khoản (EQH/EQL) chưa bị quét: ${liquidity.map((e) => `${e.kind} ${e.price.toFixed(2)}`).join(', ')}`
-          : 'Chưa phát hiện vùng thanh khoản EQH/EQL rõ ràng.',
-      ].join('\n');
-
-      const dirMatch = (z: Zone) => (bull ? z.direction === 'bull' : z.direction === 'bear');
-      const zoneDist = (z: Zone) => Math.abs(spot - (bull ? z.top : z.bottom));
-
-      // Ưu tiên Order Block; không có thì xét FVG — cả hai đều lấy vùng GẦN GIÁ NHẤT theo đúng hướng
-      const obCandidates = unmitigatedOBs.filter(dirMatch).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
-      const fvgCandidates = unmitigatedFVGs.filter(dirMatch).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
-      const picked = obCandidates[0] ? { zone: obCandidates[0], kind: 'Order Block' } : fvgCandidates[0] ? { zone: fvgCandidates[0], kind: 'FVG' } : null;
-
-      if (!picked) {
-        const dirLabel = bull ? 'BUY' : 'SELL';
+      // ============ SMC "Setup A+": Sweep → CHOCH → Order Block + FVG hợp lưu ============
+      // Dùng LẠI ĐÚNG hàm đã chạy backtest (decideLiveSetup) thay vì công thức riêng — nếu không,
+      // Backtest và Setup lệnh lại chạy hai bộ luật khác nhau và mọi con số đo được đều vô nghĩa.
+      const smcRaw = decideLiveSetup(h1, 'SMC');
+      if (!smcRaw) {
         return {
           noTrade: true,
-          reason: wantDirection === 'AUTO'
-            ? `Xu hướng H1 là ${h1Trend} nhưng chưa có Order Block/FVG M15 nào (chưa bị lấp) đủ gần giá theo đúng hướng — chưa đủ điều kiện SMC để vào lệnh, đứng ngoài chờ giá tạo vùng mới.`
-            : `Bạn chọn ${dirLabel} nhưng chưa có Order Block/FVG M15 nào (chưa bị lấp) đủ gần giá theo hướng ${dirLabel} — chưa đủ điều kiện SMC để vào lệnh theo hướng này, đứng ngoài chờ giá tạo vùng mới.`,
+          reason:
+            'Chưa đủ điều kiện Setup A+: cần đủ chuỗi (1) cấu trúc H4 rõ ràng HH+HL hoặc LL+LH, ' +
+            '(2) có cú quét thanh khoản vào Equal Low/High, PDL/PDH hoặc swing cũ, ' +
+            '(3) sau đó phá cấu trúc CHOCH, (4) có Order Block là nến ngược chiều cuối trước cú đẩy, ' +
+            '(5) có FVG trong cú đẩy và CHỒNG LÊN Order Block, (6) giá chưa hồi qua vùng hợp lưu, ' +
+            'và (7) có mục tiêu thanh khoản cho RR 1:1.5-1:5. Đứng ngoài chờ setup đủ điều kiện.',
         };
       }
-      const { zone, kind } = picked;
-      entry = bull ? zone.top : zone.bottom; // chờ giá retest về rìa vùng gần nhất
-      // Đệm 0.5×ATR (trước đây 0.15×ATR — quá mỏng) + ngưỡng sàn minSlDist: vùng Order Block/FVG có
-      // thể rất hẹp, khiến SL chỉ cách entry 1-2$ và bị nhiễu quét ngay dù hướng phân tích đúng.
-      const buffer = aRef * 0.5;
-      sl = enforceMinStop(entry, bull ? zone.bottom - buffer : zone.top + buffer, bull, minSlDist);
-      const slDist = Math.abs(entry - sl);
-
-      // Quy trình chọn TP CỐ ĐỊNH: trong các vùng thanh khoản đúng hướng, lấy vùng GẦN NHẤT đạt RR
-      // tối thiểu 1:1 (không phải vùng gần nhất tuyệt đối, vì có thể quá gần để đáng vào lệnh); nếu
-      // không vùng nào đạt, dùng RR 1:2 mặc định. Giới hạn RR tối đa 1:5 để tránh mục tiêu viển vông.
-      const minRR = 1.5;
-      const maxRR = 5;
-      const liqInDirection = liquidity
-        .filter((e) => (bull ? e.price > entry : e.price < entry))
-        .map((e) => ({ ...e, dist: Math.abs(e.price - entry) }))
-        .sort((a, b) => a.dist - b.dist);
-      const qualifying = liqInDirection.find((e) => e.dist / slDist >= minRR);
-
-      let tpNote: string;
-      if (qualifying && qualifying.dist / slDist <= maxRR) {
-        tp = qualifying.price;
-        tpNote = `vùng thanh khoản ${qualifying.kind} ${qualifying.price.toFixed(2)} — điểm hút thanh khoản gần nhất theo hướng ${bull ? 'tăng' : 'giảm'}, đạt RR tối thiểu 1:${minRR}`;
-      } else {
-        tp = bull ? entry + slDist * 2.5 : entry - slDist * 2.5;
-        tpNote = liqInDirection.length
-          ? `RR 1:2.5 mặc định (vùng thanh khoản gần nhất ${liqInDirection[0].price.toFixed(2)} không đạt RR hợp lý trong khoảng 1:${minRR}-1:${maxRR})`
-          : 'RR 1:2.5 mặc định (chưa phát hiện vùng thanh khoản phù hợp theo hướng này)';
+      if (smcRaw.direction !== direction) {
+        return {
+          noTrade: true,
+          reason: `Bạn chọn ${direction} nhưng cấu trúc H4 hiện tại chỉ cho phép ${smcRaw.direction} (theo quy tắc HH+HL / LL+LH). Không tạo setup ngược cấu trúc.`,
+        };
       }
-      rr = +(Math.abs(tp - entry) / slDist).toFixed(2);
+      entry = smcRaw.entry + offM;
+      sl = smcRaw.sl + offM;
+      tp = smcRaw.tp + offM;
+      rr = smcRaw.rr;
 
       templateReason =
-        `Cấu trúc H1 ${trendClause}. ` +
-        `Xuất hiện ${bull ? 'Bullish' : 'Bearish'} ${kind} tại vùng ${zone.bottom.toFixed(2)}-${zone.top.toFixed(2)}, gần giá hiện tại. Chờ giá hồi vào vùng này để vào ${direction} tại ${entry.toFixed(2)}. ` +
-        `Stop Loss đặt ${bull ? 'dưới' : 'trên'} vùng ${kind} tại ${sl.toFixed(2)} nhằm tránh nhiễu. ` +
-        `Take Profit đặt tại ${tpNote}, đạt tỷ lệ Risk:Reward 1:${rr}.` + warnClause;
+        `Cấu trúc H4 ${smcRaw.direction === 'BUY' ? 'tăng (HH + HL)' : 'giảm (LL + LH)'}. ` +
+        `Giá đã quét thanh khoản (Equal Low/High, PDL/PDH hoặc swing cũ) rồi phá cấu trúc CHOCH, xác nhận đổi quyền kiểm soát. ` +
+        `Điểm vào ${entry.toFixed(2)} đặt tại vùng Order Block và FVG chồng nhau — hợp lưu hai dấu vết của cùng cú đẩy. ` +
+        `Stop Loss ${sl.toFixed(2)} đặt ngoài đáy/đỉnh cú quét (không đặt sát Order Block vì dễ bị quét lại). ` +
+        `Take Profit ${tp.toFixed(2)} tại vùng thanh khoản đối diện theo cấu trúc, tỷ lệ Risk:Reward 1:${rr}.` + warnClause;
 
       aiSystemMsg =
-        'Bạn là chuyên gia Smart Money Concept (SMC/ICT) viết tiếng Việt. Nhiệm vụ DUY NHẤT: diễn giải lại một quyết định giao dịch ĐÃ CÓ SẴN ' +
+        'Bạn là chuyên gia phân tích SMC/ICT viết tiếng Việt. Nhiệm vụ DUY NHẤT: diễn giải lại một quyết định giao dịch ĐÃ CÓ SẴN ' +
         'thành 2-3 câu văn mạch lạc. TUYỆT ĐỐI không đề xuất số liệu khác, không liệt kê nhiều phương án, không đổi entry/SL/TP đã cho.';
       aiUserMsg =
-        `${smcText}\n\n` +
-        `Setup đã được thuật toán SMC chốt từ dữ liệu trên — các con số dưới đây là CUỐI CÙNG, không được đổi:\n` +
-        `- Hướng: ${direction}\n- Entry: ${entry.toFixed(2)} (rìa ${bull ? 'Bullish' : 'Bearish'} ${kind} [${zone.bottom.toFixed(2)}-${zone.top.toFixed(2)}])\n` +
-        `- Stop Loss: ${sl.toFixed(2)}\n- Take Profit: ${tp.toFixed(2)} (${tpNote})\n- RR: 1:${rr}\n` +
-        `- Xu hướng H1: ${h1Trend ?? 'chưa xác định rõ'}${lastH1Event ? ` (${eventAgeText} có ${lastH1Event.type} — dùng đúng cụm từ về thời gian này, KHÔNG tự đổi thành "vừa" nếu không phải vừa xảy ra)` : ' (theo EMA, H1 chưa có phá cấu trúc)'}\n` +
-        (counterTrend ? `- LƯU Ý BẮT BUỘC: đây là lệnh NGƯỢC xu hướng H1 do người dùng tự chọn hướng — PHẢI nêu rõ trong câu giải thích rằng đây là lệnh ngược xu hướng, rủi ro cao hơn.\n` : '') +
-        `\nViết 2-3 câu tiếng Việt giải thích NGẮN GỌN vì sao chọn đúng các con số này. Không liệt kê phương án khác, không đổi số.`;
+        `Setup A+ đã được thuật toán chốt — các con số là CUỐI CÙNG, không được đổi:\n` +
+        `- Hướng: ${direction}\n- Entry: ${entry.toFixed(2)} (vùng Order Block + FVG chồng nhau)\n` +
+        `- Stop Loss: ${sl.toFixed(2)} (ngoài đáy/đỉnh cú quét thanh khoản)\n- Take Profit: ${tp.toFixed(2)} (vùng thanh khoản đối diện)\n- RR: 1:${rr}\n` +
+        `- Chuỗi xác nhận: cấu trúc H4 → quét thanh khoản → CHOCH → Order Block + FVG hợp lưu\n` +
+        (counterTrend ? `- LƯU Ý BẮT BUỘC: nêu rõ đây là lệnh ngược xu hướng, rủi ro cao hơn.\n` : '') +
+        `\nViết 2-3 câu tiếng Việt giải thích NGẮN GỌN. Không liệt kê phương án khác, không đổi số.`;
       sourceTag = 'SMC';
     }
 

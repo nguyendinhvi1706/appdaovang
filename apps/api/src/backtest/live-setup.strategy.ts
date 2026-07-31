@@ -258,7 +258,7 @@ export function decideIctSetup(window: Candle[]): LiveSetup | null {
   }
   for (const s of swings.filter((x) => x.kind === (bull ? 'high' : 'low')).slice(-8)) targets.push(s.price);
 
-  const minRR = 1.5, maxRR = 5;
+  const minRR = 1.5, maxRR = 8;
   const valid = targets
     .filter((t) => (bull ? t > entry : t < entry))
     .map((t) => ({ price: t, rr: Math.abs(t - entry) / slDist }))
@@ -336,46 +336,122 @@ export function decideLiveSetup(window: Candle[], method: 'SMC' | 'SK'): LiveSet
     return { direction, entry, sl, tp, rr: +(Math.abs(tp - entry) / slDist).toFixed(2) };
   }
 
-  // ---- SMC: chờ retest rìa Order Block (ưu tiên) hoặc FVG gần nhất chưa bị lấp ----
-  const minZoneSize = aRef * 0.1;
-  const m15Structure = detectStructure(m15, m15Swings);
-  const sizeable = (z: Zone) => z.top - z.bottom >= minZoneSize;
-  const dirMatch = (z: Zone) => (bull ? z.direction === 'bull' : z.direction === 'bear');
-  const zoneDist = (z: Zone) => Math.abs(spot - (bull ? z.top : z.bottom));
+  // ---- SMC "Setup A+": Sweep → CHOCH → Order Block + FVG hợp lưu → pullback ----
+  return decideSmcAPlus(m15, aRef, minSlDist, spot, m15Swings);
+}
 
-  const obs = detectOrderBlocks(m15, m15Structure).filter((z) => !z.mitigated).filter(sizeable);
-  const fvgs = detectFVG(m15).filter((z) => !z.mitigated).filter(sizeable);
-  // Lọc Premium/Discount — quy tắc gốc của SMC/ICT mà nhánh này TRƯỚC ĐÂY BỎ QUÊN hoàn toàn: chỉ
-  // mua ở nửa dưới (discount) và bán ở nửa trên (premium) của dealing range. Không có bộ lọc này,
-  // thuật toán sẵn sàng mua ngay đỉnh miễn là có Order Block gần đó — sai hẳn tinh thần phương pháp.
-  const drSmc = dealingRange(m15, m15Swings);
-  const inRightHalf = (z: Zone) => {
-    if (!drSmc) return true;
-    const zonePrice = bull ? z.top : z.bottom;
-    return bull ? zonePrice < drSmc.eq : zonePrice > drSmc.eq;
-  };
+/**
+ * Setup A+ theo checklist chuẩn:
+ *   H4 (HH+HL / LL+LH) → Liquidity → Sweep → CHOCH → Order Block → FVG → Pullback
+ *   → Entry tại vùng OB và FVG CHỒNG NHAU → SL dưới đáy Sweep → TP tại thanh khoản đối diện
+ *
+ * Khác biệt lớn so với bản SMC cũ (bản cũ chỉ "tìm Order Block gần giá rồi chờ chạm"):
+ *  - Bắt buộc có LIQUIDITY SWEEP trước. Không quét thanh khoản thì không vào lệnh.
+ *  - Bắt buộc có CHOCH (phá đỉnh/đáy gần nhất) xác nhận đổi quyền kiểm soát.
+ *  - Order Block phải là NẾN NGƯỢC CHIỀU CUỐI CÙNG ngay trước cú đẩy phá cấu trúc, không phải OB bất kỳ.
+ *  - Entry chỉ đặt khi OB và FVG CHỒNG LÊN NHAU (hợp lưu) — đây là điều kiện "A+".
+ *  - SL đặt dưới ĐÁY CÚ QUÉT, không phải sát rìa OB (checklist cảnh báo sát OB rất dễ bị quét).
+ */
+function decideSmcAPlus(
+  m15: Candle[], aRef: number, minSlDist: number, spot: number, swings: Swing[],
+): LiveSetup | null {
+  const n = m15.length;
+  if (n < 300) return null;
 
-  const obCand = obs.filter(dirMatch).filter(inRightHalf).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
-  const fvgCand = fvgs.filter(dirMatch).filter(inRightHalf).filter((z) => zoneDist(z) <= aRef * 3).sort((a, b) => zoneDist(a) - zoneDist(b));
-  const zone = obCand[0] ?? fvgCand[0] ?? null;
-  if (!zone) return null;
+  // ---- BƯỚC 1: Xu hướng H4 theo cấu trúc HH+HL (tăng) hoặc LL+LH (giảm) ----
+  const h4 = aggregateBy(m15, 16);
+  if (h4.length < 20) return null;
+  const h4Sw = detectSwings(h4);
+  const highs = h4Sw.filter((s) => s.kind === 'high').slice(-2);
+  const lows = h4Sw.filter((s) => s.kind === 'low').slice(-2);
+  if (highs.length < 2 || lows.length < 2) return null;
+  const hh = highs[1].price > highs[0].price, hl = lows[1].price > lows[0].price;
+  const ll = lows[1].price < lows[0].price, lh = highs[1].price < highs[0].price;
+  const bull = hh && hl ? true : (ll && lh ? false : null);
+  if (bull == null) return null; // cấu trúc H4 không rõ ràng → đứng ngoài
 
-  const entry = bull ? zone.top : zone.bottom;
+  // ---- BƯỚC 2: Liquidity — Equal Low/High + PDL/PDH + Swing Low/High ----
+  const pd = previousDayLevels(m15);
+  const eq = detectEqualLevels(m15, swings);
+  const pools: number[] = [];
+  if (pd) pools.push(bull ? pd.pdl : pd.pdh);
+  for (const e of eq) {
+    if (bull && e.kind === 'EQL') pools.push(e.price);
+    if (!bull && e.kind === 'EQH') pools.push(e.price);
+  }
+  for (const s of swings.filter((x) => x.kind === (bull ? 'low' : 'high')).slice(-6)) pools.push(s.price);
+  if (!pools.length) return null;
+
+  // ---- BƯỚC 3: Liquidity Sweep — đâm thủng mốc rồi ĐÓNG CỬA trở lại ----
+  let sweepIdx = -1, sweepExtreme = 0;
+  for (let i = n - 1; i >= Math.max(0, n - 24); i--) {
+    const hit = pools.some((lv) => (bull ? m15[i].low < lv && m15[i].close > lv
+                                         : m15[i].high > lv && m15[i].close < lv));
+    if (hit) { sweepIdx = i; sweepExtreme = bull ? m15[i].low : m15[i].high; break; }
+  }
+  if (sweepIdx < 0 || sweepIdx >= n - 2) return null;
+
+  // ---- BƯỚC 4: CHOCH — phá đỉnh (Buy) / đáy (Sell) gần nhất trước cú quét ----
+  const opposing = swings.filter((s) => s.index < sweepIdx && s.kind === (bull ? 'high' : 'low'));
+  if (!opposing.length) return null;
+  const chochLevel = opposing[opposing.length - 1].price;
+  let breakIdx = -1;
+  for (let i = sweepIdx + 1; i < n; i++) {
+    if (bull ? m15[i].high > chochLevel : m15[i].low < chochLevel) { breakIdx = i; break; }
+  }
+  if (breakIdx < 0) return null; // chưa phá cấu trúc → KHÔNG vào lệnh
+
+  // ---- BƯỚC 5: Order Block = nến ngược chiều CUỐI CÙNG ngay trước cú đẩy phá cấu trúc ----
+  let obIdx = -1;
+  for (let j = breakIdx - 1; j >= sweepIdx; j--) {
+    const bearish = m15[j].close < m15[j].open;
+    if (bull ? bearish : !bearish) { obIdx = j; break; }
+  }
+  if (obIdx < 0) return null;
+  const obTop = Math.max(m15[obIdx].open, m15[obIdx].close);
+  const obBottom = Math.min(m15[obIdx].open, m15[obIdx].close);
+
+  // ---- BƯỚC 6: FVG sinh ra trong cú đẩy ----
+  const fvg = findFreshFvg(m15, sweepIdx, Math.min(breakIdx + 2, n - 1), bull);
+  if (!fvg) return null;
+
+  // ---- BƯỚC 7-8: Hợp lưu Order Block + FVG ----
+  // Lưu ý hình học: trong một cú đẩy sạch, FVG luôn nằm NGAY TRÊN thân nến Order Block (với lệnh
+  // Buy) chứ không đè lên nó — nên nếu bắt buộc hai vùng phải CHỒNG nhau thì điều kiện gần như
+  // không bao giờ thoả. "Hợp lưu" ở đây hiểu đúng là hai vùng LIỀN KỀ nhau, tạo thành một vùng cầu
+  // (hoặc cung) liên tục mà giá phải đi xuyên qua khi hồi về.
+  const gapBetween = bull ? fvg.bottom - obTop : obBottom - fvg.top;
+  if (gapBetween > aRef * 0.5) return null; // hai vùng cách xa nhau → không phải hợp lưu A+
+
+  // Chờ pullback về Order Block (vùng chiết khấu sâu nhất trong cụm hợp lưu)
+  const entry = bull ? obTop : obBottom;
+  if (bull ? entry >= spot : entry <= spot) return null; // giá đã hồi qua vùng rồi
+
+  // ---- BƯỚC 9: SL dưới ĐÁY CÚ QUÉT (không đặt sát Order Block) ----
   const buffer = aRef * 0.5;
-  const sl = enforceMinStop(entry, bull ? zone.bottom - buffer : zone.top + buffer, bull, minSlDist);
+  const sl = enforceMinStop(entry, bull ? sweepExtreme - buffer : sweepExtreme + buffer, bull, minSlDist);
   const slDist = Math.abs(entry - sl);
   if (slDist <= 0) return null;
 
-  const minRR = 1.5, maxRR = 5;
-  const liquidity = detectEqualLevels(m15, m15Swings);
-  const liqInDir = liquidity
-    .filter((e) => (bull ? e.price > entry : e.price < entry))
-    .map((e) => ({ ...e, dist: Math.abs(e.price - entry) }))
-    .sort((a, b) => a.dist - b.dist);
-  const qualifying = liqInDir.find((e) => e.dist / slDist >= minRR);
-  const tp = qualifying && qualifying.dist / slDist <= maxRR
-    ? qualifying.price
-    : (bull ? entry + slDist * 2.5 : entry - slDist * 2.5);
+  // ---- BƯỚC 10: TP tại Buy-side / Sell-side Liquidity ----
+  const targets: number[] = [];
+  if (pd) targets.push(bull ? pd.pdh : pd.pdl);
+  for (const e of eq) {
+    if (bull && e.kind === 'EQH') targets.push(e.price);
+    if (!bull && e.kind === 'EQL') targets.push(e.price);
+  }
+  for (const s of swings.filter((x) => x.kind === (bull ? 'high' : 'low')).slice(-8)) targets.push(s.price);
 
-  return { direction, entry, sl, tp, rr: +(Math.abs(tp - entry) / slDist).toFixed(2) };
+  const valid = targets
+    .filter((t) => (bull ? t > entry : t < entry))
+    .map((t) => ({ price: t, rr: Math.abs(t - entry) / slDist }))
+    .filter((t) => t.rr >= 1.5 && t.rr <= 8)
+    .sort((a, b) => a.rr - b.rr);
+  if (!valid.length) return null;
+
+  return {
+    direction: bull ? 'BUY' : 'SELL',
+    entry, sl, tp: valid[0].price,
+    rr: +(Math.abs(valid[0].price - entry) / slDist).toFixed(2),
+  };
 }

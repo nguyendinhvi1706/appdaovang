@@ -245,8 +245,10 @@ function runLiveSetupBacktest(c: Candle[], cfg: BacktestConfig): BacktestResult 
     method === 'ICT' ? decideIctSetup(win) : decideLiveSetup(win, method);
   // ICT cần cửa sổ dài hơn hẳn vì phải dựng khung H4 (gộp 16 nến) và Daily (gộp 96 nến) để xác
   // định xu hướng khung lớn theo đúng quy trình — 500 nến M15 chỉ ra ~5 nến Daily, không đủ.
-  const WINDOW = cfg.strategy === 'live_ict' ? 2400 : 500;
-  const WARMUP = cfg.strategy === 'live_ict' ? 400 : 120; // đủ nến để dựng khung lớn + EMA50
+  // ICT và SMC "Setup A+" đều cần cửa sổ dài để dựng khung H4 (gộp 16 nến) và Daily (gộp 96 nến)
+  // theo đúng quy trình — 500 nến M15 chỉ ra ~31 nến H4, không đủ để đọc cấu trúc HH-HL đáng tin.
+  const WINDOW = cfg.strategy === 'live_sk' ? 500 : 2400;
+  const WARMUP = cfg.strategy === 'live_sk' ? 120 : 400; // đủ nến để dựng khung lớn + EMA50
   const PENDING_BARS = 96; // lệnh chờ quá 96 nến (~1 ngày trên M15) mà chưa khớp thì huỷ
 
   let balance = cfg.initialBalance;
