@@ -279,65 +279,128 @@ export function decideIctSetup(window: Candle[]): LiveSetup | null {
  * @param window nến M15 đã đóng, tính đến thời điểm ra quyết định (nến cuối = hiện tại)
  */
 export function decideLiveSetup(window: Candle[], method: 'SMC' | 'SK'): LiveSetup | null {
-  if (window.length < 60) return null;
+  if (window.length < 300) return null;
   const m15 = window;
   const spot = m15[m15.length - 1].close;
-
   const aRef = atrOf(m15) ?? spot * 0.005;
   const minSlDist = Math.max(aRef * 1.5, spot * 0.001);
   const m15Swings = detectSwings(m15);
 
-  // --- Xu hướng H1: ưu tiên BOS/CHOCH gần nhất, thiếu thì dùng EMA20/50 (giống bản live) ---
-  const h1 = aggregateBy(m15, 4);
-  const h1Swings = detectSwings(h1);
-  const h1Structure = detectStructure(h1, h1Swings);
-  const lastH1Event = h1Structure[h1Structure.length - 1] ?? null;
-  const h1Closes = h1.map((x) => x.close);
-  const h1e20 = emaOf(h1Closes, 20);
-  const h1e50 = emaOf(h1Closes, 50);
-  const h1Trend: 'TĂNG' | 'GIẢM' | null = lastH1Event
-    ? (lastH1Event.direction === 'bull' ? 'TĂNG' : 'GIẢM')
-    : (h1e20 != null && h1e50 != null ? (h1e20 >= h1e50 ? 'TĂNG' : 'GIẢM') : null);
-  if (!h1Trend) return null; // backtest luôn chạy chế độ AUTO (thuận xu hướng)
-
-  const bull = h1Trend === 'TĂNG';
-  const direction: 'BUY' | 'SELL' = bull ? 'BUY' : 'SELL';
-
-  if (method === 'SK') {
-    // ---- SK System: Fibonacci Retracement 0.618 vào lệnh, 0.786 làm SL, Extension làm TP ----
-    const wave = pickWave(m15Swings, bull ? 'low' : 'high');
-    if (!wave) return null;
-    const validWave = bull ? wave.sB.price > wave.s0.price : wave.sB.price < wave.s0.price;
-    if (!validWave) return null;
-
-    const s0P = wave.s0.price, sAP = wave.sA.price, sBP = wave.sB.price;
-    const range = Math.abs(sAP - s0P);
-    if (range <= 0) return null;
-    const fibLevel = (r: number) => (bull ? sAP - r * range : sAP + r * range);
-
-    const entry = fibLevel(0.618);
-    const buffer = aRef * 0.5;
-    const sl = enforceMinStop(entry, bull ? fibLevel(0.786) - buffer : fibLevel(0.786) + buffer, bull, minSlDist);
-    const slDist = Math.abs(entry - sl);
-    if (slDist <= 0) return null;
-
-    const ratios = [1.272, 1.382, 1.618, 1.809, 2];
-    const minRR = 1.5, maxRR = 5;
-    let tp = bull ? entry + slDist * 2.5 : entry - slDist * 2.5;
-    for (const r of ratios) {
-      const cand = bull ? sBP + r * range : sBP - r * range;
-      const candRR = Math.abs(cand - entry) / slDist;
-      if (candRR >= minRR && candRR <= maxRR) { tp = cand; break; }
-    }
-
-    // Sóng đã bị vô hiệu trước khi kịp vào lệnh
-    if (bull ? (spot <= sl || spot >= tp) : (spot >= sl || spot <= tp)) return null;
-
-    return { direction, entry, sl, tp, rr: +(Math.abs(tp - entry) / slDist).toFixed(2) };
-  }
-
-  // ---- SMC "Setup A+": Sweep → CHOCH → Order Block + FVG hợp lưu → pullback ----
+  if (method === 'SK') return decideSkGoldenPocket(m15, aRef, minSlDist, spot, m15Swings);
   return decideSmcAPlus(m15, aRef, minSlDist, spot, m15Swings);
+}
+
+/**
+ * SK System — "setup mạnh nhất" theo đúng quy trình:
+ *   Xu hướng H4+H1 → Impulse (0→A) → Retracement (A→B) → GOLDEN POCKET 0.705-0.786
+ *   → XÁC NHẬN (nến từ chối hoặc phá cấu trúc ngắn hạn) → Entry → SL dưới điểm 0
+ *   → TP1 tại đỉnh A, TP2 tại Fib Extension 1.272 / 1.414 / 1.618
+ *
+ * Ba khác biệt lớn so với bản SK cũ:
+ *  1. Vùng vào lệnh là GOLDEN POCKET 0.705-0.786, không phải mốc 0.618 đơn lẻ.
+ *  2. BẮT BUỘC CÓ XÁC NHẬN — bản cũ đặt lệnh chờ ngay khi giá chạm mốc Fib, tức mua chỉ vì "giá tới
+ *     vùng". Golden Pocket chỉ là VỊ TRÍ, không phải tín hiệu. Bản này chờ nến từ chối mạnh hoặc
+ *     phá cấu trúc ngắn hạn theo hướng xu hướng rồi mới vào.
+ *  3. SL đặt DƯỚI ĐIỂM 0 (gốc sóng), không đặt ngay sau 0.786 — tức không nằm trong/sát vùng
+ *     Golden Pocket, nơi giá hay quét thêm một nhịp trước khi đi thật.
+ */
+function decideSkGoldenPocket(
+  m15: Candle[], aRef: number, minSlDist: number, spot: number, swings: Swing[],
+): LiveSetup | null {
+  const n = m15.length;
+
+  // ---- BƯỚC 1: Xu hướng H4 VÀ H1 phải cùng chiều ----
+  const trendOf = (c: Candle[]): boolean | null => {
+    if (c.length < 25) return null;
+    const ev = detectStructure(c, detectSwings(c)).slice(-1)[0] ?? null;
+    if (ev) return ev.direction === 'bull';
+    const cl = c.map((x) => x.close);
+    const a = emaOf(cl, 20), b = emaOf(cl, 50);
+    return a != null && b != null ? a >= b : null;
+  };
+  const h4Bull = trendOf(aggregateBy(m15, 16));
+  const h1Bull = trendOf(aggregateBy(m15, 4));
+  if (h4Bull == null || h1Bull == null || h4Bull !== h1Bull) return null;
+  const bull = h4Bull;
+
+  // ---- BƯỚC 2: Impulse 0→A phải là cú đẩy MẠNH (Expansion Leg) ----
+  const kind0: 'high' | 'low' = bull ? 'low' : 'high';
+  const p0 = [...swings].reverse().find((s) => s.kind === kind0 && s.index < n - 6);
+  if (!p0) return null;
+  const after0 = swings.filter((s) => s.index > p0.index && s.kind !== kind0);
+  if (!after0.length) return null;
+  const pA = bull
+    ? after0.reduce((m, s) => (s.price > m.price ? s : m))
+    : after0.reduce((m, s) => (s.price < m.price ? s : m));
+  const range = Math.abs(pA.price - p0.price);
+  if (range < aRef * 2) return null;                       // cú đẩy quá yếu, không phải impulse
+  if (bull ? pA.price <= p0.price : pA.price >= p0.price) return null;
+
+  // ---- BƯỚC 3: Golden Pocket 0.705 - 0.786 của sóng 0→A ----
+  const fib = (r: number) => (bull ? pA.price - r * range : pA.price + r * range);
+  const gpNear = fib(0.705);   // rìa gần đỉnh A
+  const gpFar = fib(0.786);    // rìa gần điểm 0
+  const gpTop = bull ? gpNear : gpFar;
+  const gpBottom = bull ? gpFar : gpNear;
+
+  // ---- BƯỚC 4: Giá phải đã hồi VÀO Golden Pocket, và chưa phá điểm 0 ----
+  const afterA = m15.slice(pA.index + 1);
+  if (afterA.length < 2) return null;
+  const touched = afterA.some((c) => (bull ? c.low <= gpTop && c.low >= gpBottom - aRef * 0.3
+                                           : c.high >= gpBottom && c.high <= gpTop + aRef * 0.3));
+  if (!touched) return null;
+  const brokeOrigin = bull
+    ? Math.min(...afterA.map((c) => c.low)) < p0.price
+    : Math.max(...afterA.map((c) => c.high)) > p0.price;
+  if (brokeOrigin) return null;                            // sóng đã bị vô hiệu
+
+  // ---- BƯỚC 5: XÁC NHẬN — nến từ chối mạnh HOẶC phá cấu trúc ngắn hạn ----
+  const CONFIRM_WINDOW = 6;
+  const recent = m15.slice(Math.max(pA.index + 1, n - CONFIRM_WINDOW));
+  // (a) Nến từ chối: râu đâm vào Golden Pocket nhưng đóng cửa bật ra ngoài, thân nghiêng đúng hướng
+  const rejection = recent.some((c) => {
+    const span = c.high - c.low;
+    if (span <= 0) return false;
+    const pos = (c.close - c.low) / span;                  // vị trí giá đóng trong biên độ nến
+    return bull
+      ? c.low <= gpTop && c.close > gpTop && pos >= 0.5
+      : c.high >= gpBottom && c.close < gpBottom && pos <= 0.5;
+  });
+  // (b) Phá cấu trúc ngắn hạn: vượt swing ngược chiều gần nhất hình thành SAU đỉnh A
+  const microSwings = swings.filter((s) => s.index > pA.index && s.kind !== kind0);
+  const microLevel = microSwings.length ? microSwings[microSwings.length - 1].price : null;
+  const bos = microLevel != null && recent.some((c) => (bull ? c.high > microLevel : c.low < microLevel));
+  if (!rejection && !bos) return null;                     // Golden Pocket chỉ là VỊ TRÍ, chưa đủ để vào
+
+  // ---- BƯỚC 6: Entry ngay sau xác nhận (không phải lệnh chờ mù quáng tại mốc Fib) ----
+  const entry = spot;
+
+  // ---- BƯỚC 7: SL dưới/trên ĐIỂM 0, không nằm trong Golden Pocket ----
+  const buffer = aRef * 0.5;
+  const sl = enforceMinStop(entry, bull ? p0.price - buffer : p0.price + buffer, bull, minSlDist);
+  const slDist = Math.abs(entry - sl);
+  if (slDist <= 0) return null;
+
+  // ---- BƯỚC 8: TP1 = đỉnh A, TP2 = Fib Extension 1.272 / 1.414 / 1.618 ----
+  const ladder = [
+    pA.price,                                                  // TP1
+    bull ? p0.price + 1.272 * range : p0.price - 1.272 * range,
+    bull ? p0.price + 1.414 * range : p0.price - 1.414 * range,
+    bull ? p0.price + 1.618 * range : p0.price - 1.618 * range,
+  ];
+  const MIN_RR = 2;                                            // yêu cầu chất lượng của SK System
+  const pick = ladder
+    .filter((t) => (bull ? t > entry : t < entry))
+    .map((t) => ({ price: t, rr: Math.abs(t - entry) / slDist }))
+    .filter((t) => t.rr >= MIN_RR && t.rr <= 8)
+    .sort((a, b) => a.rr - b.rr)[0];
+  if (!pick) return null;                                      // không đạt RR tối thiểu 1:2 → bỏ qua
+
+  return {
+    direction: bull ? 'BUY' : 'SELL',
+    entry, sl, tp: pick.price,
+    rr: +pick.rr.toFixed(2),
+  };
 }
 
 /**
