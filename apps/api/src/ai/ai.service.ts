@@ -373,7 +373,12 @@ export class AiService implements OnModuleInit {
     // setup đã tạo (checkOpenSetups) thì KHÔNG dùng futures nữa — dùng giá spot thật Swissquote real-
     // time — vì đó mới là chỗ đã từng báo sai WIN do basis trôi theo thời gian trong cả cửa sổ dài.
     const [h1Res, h1c, spotQ, market] = await Promise.all([
-      this.market.candlesWithSource(symbol, '15m').catch(() => ({ data: [] as Candle[], ticker: null as string | null })),
+      // 2400 nến M15 (~25 ngày) thay vì 500 (~5 ngày): cả ba phương pháp giờ đều cần dựng khung H4
+      // (gộp 16 nến) và Daily (gộp 96 nến) để xác định xu hướng — 500 nến chỉ ra ~5 nến Daily, quá
+      // ít để đọc cấu trúc. Dùng đúng độ sâu mà Backtest dùng để hai bên cho cùng kết quả.
+      this.market.deepCandles(symbol, '15m', 2400)
+        .then((data) => ({ data, ticker: 'TWELVEDATA' as string | null }))
+        .catch(() => ({ data: [] as Candle[], ticker: null as string | null })),
       this.market.candles(symbol, '1h').catch(() => [] as Candle[]),
       this.market.quote(symbol).catch(() => null),
       this.buildMarketContext(symbol, '15m'),
@@ -452,83 +457,50 @@ export class AiService implements OnModuleInit {
     let templateReason: string, aiSystemMsg: string, aiUserMsg: string, sourceTag: string;
 
     if (method === 'SK') {
-      // ============ SK System: Fibonacci Retracement + Extension (sóng 3 điểm 0→A→B) ============
-      // Kỹ thuật kinh điển: xác nhận xu hướng bằng sóng dẫn đường 0→A, chờ giá hồi về vùng "tỉ lệ
-      // vàng" Fibonacci Retracement 0.5-0.667 của sóng đó để vào lệnh, SL sau mốc 0.786, TP đo bằng
-      // Fibonacci Extension chiếu từ điểm hồi B. Toàn bộ số liệu tính từ swing thật trên M15 — AI
-      // không được tự chọn điểm sóng hay số liệu, chỉ diễn giải.
-      const wantKind: 'high' | 'low' = bull ? 'low' : 'high';
-      const wave = pickWave(m15Swings, wantKind);
-      const validWave = wave && (bull ? wave.sB.price > wave.s0.price : wave.sB.price < wave.s0.price);
-      if (!validWave) {
+      // ============ SK System — Golden Pocket 0.705-0.786 + bắt buộc XÁC NHẬN ============
+      // Dùng LẠI ĐÚNG hàm đã chạy backtest (decideLiveSetup) — không giữ công thức riêng, để bản
+      // chạy thật và bản đo lường không bao giờ lệch nhau.
+      const skRaw = decideLiveSetup(h1, 'SK');
+      if (!skRaw) {
         return {
           noTrade: true,
-          reason: `Chưa tìm được sóng ${bull ? 'tăng' : 'giảm'} 3 điểm (0→A→B) hợp lệ theo cấu trúc SK System trên M15 (cần ${bull ? 'đáy sau cao hơn đáy trước' : 'đỉnh sau thấp hơn đỉnh trước'}) — đứng ngoài chờ sóng mới hình thành.`,
+          reason:
+            'Chưa đủ điều kiện SK System: cần đủ chuỗi (1) xu hướng H4 và H1 CÙNG chiều, ' +
+            '(2) có một Impulse 0→A đủ mạnh (tối thiểu 2×ATR), ' +
+            '(3) giá đã hồi vào vùng Golden Pocket 0.705-0.786 mà chưa phá điểm 0, ' +
+            '(4) đã có XÁC NHẬN sau khi chạm Golden Pocket — nến từ chối mạnh hoặc phá cấu trúc ngắn hạn ' +
+            '(chỉ chạm vùng thôi thì CHƯA đủ, đó mới là vị trí chứ chưa phải tín hiệu), ' +
+            'và (5) có mục tiêu đạt RR tối thiểu 1:2. Đứng ngoài chờ setup đủ điều kiện.',
         };
       }
-      const s0P = wave!.s0.price + offM, sAP = wave!.sA.price + offM, sBP = wave!.sB.price + offM;
-      const range = Math.abs(sAP - s0P);
-      const fibLevel = (r: number) => (bull ? sAP - r * range : sAP + r * range);
-      entry = fibLevel(0.618); // điểm "tỉ lệ vàng" giữa vùng 0.5-0.667
-      const slFib = fibLevel(0.786);
-      // Đệm 0.5×ATR (trước đây 0.15×ATR — quá mỏng): dải Fibonacci 0.618→0.786 chỉ chiếm 16.8% biên
-      // sóng, nên nếu sóng nhỏ thì SL chỉ cách entry vài đô. Cộng thêm ngưỡng sàn minSlDist bên dưới.
-      const buffer = aRef * 0.5;
-      sl = enforceMinStop(entry, bull ? slFib - buffer : slFib + buffer, bull, minSlDist);
-      const slDist = Math.abs(entry - sl);
-
-      // Chọn tỉ lệ Extension nhỏ nhất cho RR nằm trong khoảng HỢP LÝ 1:1.5 - 1:5. Trước đây chỉ yêu
-      // cầu RR ≥ 1:1 nên mốc nhỏ nhất luôn thoả (vì SL quá sát), sinh ra mục tiêu cách 90$ trên khung
-      // M15 — RR trên giấy rất đẹp nhưng xác suất chạm gần như không có.
-      const ratios = [1.272, 1.382, 1.618, 1.809, 2];
-      const minRR = 1.5, maxRR = 5;
-      let usedRatio: number | null = null;
-      tp = bull ? entry + slDist * 2.5 : entry - slDist * 2.5;
-      for (const r of ratios) {
-        const cand = bull ? sBP + r * range : sBP - r * range;
-        const candRR = Math.abs(cand - entry) / slDist;
-        if (candRR >= minRR && candRR <= maxRR) { tp = cand; usedRatio = r; break; }
-      }
-      rr = +(Math.abs(tp - entry) / slDist).toFixed(2);
-
-      // Nếu giá đã vượt qua SL hoặc đã tới TP dự kiến trước khi kịp tạo setup → sóng đã vô hiệu
-      const invalidated = bull ? (spot <= sl || spot >= tp) : (spot >= sl || spot <= tp);
-      if (invalidated) {
+      if (skRaw.direction !== direction) {
         return {
           noTrade: true,
-          reason: 'Sóng Fibonacci vừa xác định đã bị vô hiệu — giá đã vượt qua vùng Stop Loss hoặc đã đạt vùng Take Profit dự kiến trước khi kịp tạo setup. Đứng ngoài chờ sóng mới.',
+          reason: `Bạn chọn ${direction} nhưng sóng SK System hiện tại chỉ cho tín hiệu ${skRaw.direction} (theo xu hướng H4+H1). Không tạo setup ngược xu hướng.`,
         };
       }
-
-      const skText = [
-        'CẤU TRÚC SK SYSTEM (Fibonacci Retracement/Extension, khung M15, mức giá đã quy về spot):',
-        lastH1Event
-          ? `H1 ${eventAgeText} có tín hiệu ${lastH1Event.type} theo hướng ${lastH1Event.direction === 'bull' ? 'TĂNG' : 'GIẢM'} tại mốc ${(lastH1Event.price + offM).toFixed(2)}.`
-          : 'H1 chưa có phá cấu trúc (BOS/CHOCH) rõ ràng gần đây — dùng EMA làm căn cứ xu hướng tạm thời.',
-        `Sóng dẫn đường 0→A: từ ${s0P.toFixed(2)} đến ${sAP.toFixed(2)}. Điểm B (điểm hồi gần nhất): ${sBP.toFixed(2)} — ${bull ? 'cao hơn' : 'thấp hơn'} điểm 0, xác nhận cấu trúc ${bull ? 'tăng' : 'giảm'} còn hiệu lực.`,
-        `Vùng vào lệnh (Fibonacci Retracement 0.5-0.667 của sóng 0-A): ${fibLevel(0.5).toFixed(2)} - ${fibLevel(0.667).toFixed(2)}.`,
-      ].join('\n');
+      entry = skRaw.entry + offM;
+      sl = skRaw.sl + offM;
+      tp = skRaw.tp + offM;
+      rr = skRaw.rr;
 
       templateReason =
-        `Cấu trúc H1 ${trendClause}. ` +
-        `Trên M15 xác định sóng ${bull ? 'tăng' : 'giảm'} 3 điểm theo SK System: điểm 0 tại ${s0P.toFixed(2)}, điểm A tại ${sAP.toFixed(2)}, điểm B (hồi gần nhất) tại ${sBP.toFixed(2)} — ${bull ? 'đáy sau cao hơn đáy trước' : 'đỉnh sau thấp hơn đỉnh trước'}, xác nhận cấu trúc ${bull ? 'tăng' : 'giảm'} còn hiệu lực. ` +
-        `Chờ giá hồi về vùng Fibonacci Retracement 0.5-0.667 (điểm vào ${entry.toFixed(2)}) để vào ${direction}. ` +
-        `Stop Loss đặt sau mốc Fibonacci 0.786 tại ${sl.toFixed(2)} (đã nới tối thiểu 1.5×ATR để không bị quét bởi nhiễu thường ngày). ` +
-        (usedRatio
-          ? `Take Profit đặt tại mốc Fibonacci Extension ${usedRatio} chiếu từ điểm B (${tp.toFixed(2)}), đạt tỷ lệ Risk:Reward 1:${rr}.`
-          : `Không mốc Fibonacci Extension nào cho RR hợp lý trong khoảng 1:1.5-1:5 nên Take Profit dùng mức RR 1:2.5 mặc định (${tp.toFixed(2)}).`) + warnClause;
+        `Xu hướng H4 và H1 cùng ${skRaw.direction === 'BUY' ? 'tăng' : 'giảm'}. ` +
+        `Đã xác định một Impulse (sóng 0→A) đủ mạnh, giá hồi về vùng Golden Pocket 0.705-0.786 của sóng đó. ` +
+        `Quan trọng: KHÔNG vào lệnh chỉ vì giá chạm vùng — đã chờ tín hiệu xác nhận (nến từ chối mạnh hoặc phá cấu trúc ngắn hạn theo hướng xu hướng) rồi mới vào tại ${entry.toFixed(2)}. ` +
+        `Stop Loss ${sl.toFixed(2)} đặt ngoài điểm 0 (gốc sóng), không nằm trong Golden Pocket vì đó là nơi giá hay quét thêm một nhịp. ` +
+        `Take Profit ${tp.toFixed(2)} theo thang đỉnh A / Fibonacci Extension, đạt tỷ lệ Risk:Reward 1:${rr} (yêu cầu tối thiểu 1:2).` + warnClause;
 
       aiSystemMsg =
-        'Bạn là chuyên gia phân tích Fibonacci Retracement/Extension (SK System) viết tiếng Việt. Nhiệm vụ DUY NHẤT: diễn giải lại một quyết định giao dịch ĐÃ CÓ SẴN ' +
+        'Bạn là chuyên gia phân tích Fibonacci (SK System) viết tiếng Việt. Nhiệm vụ DUY NHẤT: diễn giải lại một quyết định giao dịch ĐÃ CÓ SẴN ' +
         'thành 2-3 câu văn mạch lạc. TUYỆT ĐỐI không đề xuất số liệu khác, không liệt kê nhiều phương án, không đổi entry/SL/TP đã cho.';
       aiUserMsg =
-        `${skText}\n\n` +
-        `Setup đã được thuật toán SK System (Fibonacci) chốt từ dữ liệu trên — các con số dưới đây là CUỐI CÙNG, không được đổi:\n` +
-        `- Hướng: ${direction}\n- Entry: ${entry.toFixed(2)} (Fibonacci Retracement 0.618 của sóng 0-A)\n` +
-        `- Stop Loss: ${sl.toFixed(2)} (sau mốc Fibonacci 0.786, nới tối thiểu 1.5×ATR)\n- Take Profit: ${tp.toFixed(2)} (${usedRatio ? `Fibonacci Extension ${usedRatio} chiếu từ điểm B` : 'RR 1:2.5 mặc định — không mốc Extension nào cho RR hợp lý'})\n- RR: 1:${rr}\n` +
-        `- Xu hướng H1: ${h1Trend ?? 'chưa xác định rõ'}${lastH1Event ? ` (${eventAgeText} có ${lastH1Event.type})` : ' (theo EMA, H1 chưa có phá cấu trúc)'}\n` +
-        (counterTrend ? `- LƯU Ý BẮT BUỘC: đây là lệnh NGƯỢC xu hướng H1 do người dùng tự chọn hướng — PHẢI nêu rõ trong câu giải thích rằng đây là lệnh ngược xu hướng, rủi ro cao hơn.\n` : '') +
-        `\nViết 2-3 câu tiếng Việt giải thích NGẮN GỌN vì sao chọn đúng các con số này. Không liệt kê phương án khác, không đổi số.`;
+        `Setup SK System đã được thuật toán chốt — các con số là CUỐI CÙNG, không được đổi:\n` +
+        `- Hướng: ${direction}\n- Entry: ${entry.toFixed(2)} (vào sau khi có xác nhận tại Golden Pocket 0.705-0.786)\n` +
+        `- Stop Loss: ${sl.toFixed(2)} (ngoài điểm 0 — gốc sóng Impulse)\n- Take Profit: ${tp.toFixed(2)} (đỉnh A hoặc Fibonacci Extension)\n- RR: 1:${rr}\n` +
+        `- Chuỗi xác nhận: H4+H1 cùng chiều → Impulse mạnh → hồi về Golden Pocket → có tín hiệu xác nhận\n` +
+        (counterTrend ? `- LƯU Ý BẮT BUỘC: nêu rõ đây là lệnh ngược xu hướng, rủi ro cao hơn.\n` : '') +
+        `\nViết 2-3 câu tiếng Việt giải thích NGẮN GỌN. Không liệt kê phương án khác, không đổi số.`;
       sourceTag = 'SK';
     } else if (method === 'ICT') {
       // ============ ICT: quét thanh khoản + Killzone + Premium/Discount ============
