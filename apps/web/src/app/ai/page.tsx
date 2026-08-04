@@ -213,6 +213,7 @@ function SetupsTab() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [clearing, setClearing] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -225,6 +226,26 @@ function SetupsTab() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  /** Xoá lịch sử setup để tính lại thống kê từ đầu. Hỏi xác nhận vì thao tác này không hoàn tác được. */
+  async function clearHistory() {
+    const keepOpen = confirm(
+      'Xoá lịch sử setup và tính lại thống kê từ đầu?\n\n' +
+      'OK = giữ lại các lệnh ĐANG CHỜ / ĐANG CHẠY, chỉ xoá lệnh đã đóng.\n' +
+      'Cancel = quay lại, không xoá gì.',
+    );
+    if (!keepOpen) return;
+    setClearing(true); setError(''); setNotice('');
+    try {
+      const res = await api<{ deleted: number }>('/ai/setups?keepOpen=1', { method: 'DELETE' });
+      setNotice(`Đã xoá ${res.deleted} lệnh đã đóng. Thống kê sẽ tính lại từ các lệnh mới.`);
+      await load();
+    } catch (e: any) {
+      setError(e?.message || 'Không xoá được lịch sử');
+    } finally {
+      setClearing(false);
+    }
+  }
 
   async function create() {
     setCreating(true); setError(''); setNotice('');
@@ -276,6 +297,11 @@ function SetupsTab() {
           <button className="px-3 py-2 rounded-lg border border-border hover:border-accent text-sm"
             onClick={load} disabled={refreshing}>
             {refreshing ? 'Đang cập nhật...' : '🔄 Cập nhật kết quả'}
+          </button>
+          <button className="px-3 py-2 rounded-lg border border-border hover:border-red-400 text-sm text-gray-400 hover:text-red-400"
+            title="Xoá toàn bộ lịch sử setup và làm lại thống kê từ đầu. Dùng khi số liệu cũ không còn đáng tin (VD sau khi sửa lỗi tính kết quả hoặc đổi logic phương pháp)."
+            onClick={clearHistory} disabled={clearing}>
+            {clearing ? 'Đang xoá...' : '🗑 Xoá lịch sử'}
           </button>
           {closed.length > 0 && (
             <span className="text-sm text-gray-400 ml-auto">

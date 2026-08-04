@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Request, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Request, UseGuards } from '@nestjs/common';
 import { IsArray, IsIn, IsOptional, IsString } from 'class-validator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AiService, ChatMessage } from './ai.service';
@@ -42,6 +42,12 @@ export class AiController {
   @Get('setups')
   listSetups(@Request() req: any) {
     return this.svc.listSetups(req.user.id);
+  }
+
+  /** Xoá lịch sử setup của chính người dùng. `?keepOpen=1` để giữ lại lệnh đang chờ/đang chạy. */
+  @Delete('setups')
+  clearSetups(@Request() req: any, @Query('keepOpen') keepOpen?: string) {
+    return this.svc.clearSetups(req.user.id, keepOpen === '1');
   }
 
   @Patch('setups/:id/cancel')

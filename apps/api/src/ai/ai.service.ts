@@ -703,6 +703,18 @@ export class AiService implements OnModuleInit {
     return this.prisma.aiSetup.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: 50 });
   }
 
+  /** Xoá lịch sử setup — dùng khi thống kê cũ không còn đáng tin (VD sau khi sửa lỗi tính kết quả,
+   *  hoặc sau khi đổi logic phương pháp nên số liệu cũ không so sánh được với số liệu mới).
+   *  `keepOpen = true` giữ lại các lệnh đang chờ/đang chạy, chỉ xoá lệnh đã đóng. */
+  async clearSetups(userId: string, keepOpen = false) {
+    const res = await this.prisma.aiSetup.deleteMany({
+      where: keepOpen
+        ? { userId, status: { notIn: ['PENDING', 'RUNNING'] } }
+        : { userId },
+    });
+    return { deleted: res.count };
+  }
+
   async cancelSetup(userId: string, id: string) {
     const s = await this.prisma.aiSetup.findFirst({ where: { id, userId } });
     if (!s) throw new NotFoundException('Không tìm thấy setup');
