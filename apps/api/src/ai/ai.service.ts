@@ -53,7 +53,7 @@ export class AiService implements OnModuleInit {
   /** Giá spot thật (Swissquote) lấy mẫu lượt quét gần nhất theo symbol — dùng làm điểm neo khi
    *  nguồn nến lịch sử đang là futures (GC=F) không đáng tin, để ghép 2 điểm liên tiếp thành
    *  1 khoảng giá đã đi qua giữa 2 lượt quét thay vì phải tin OHLC futures lệch basis. */
-  private lastSpotBySymbol = new Map<string, number>();
+  private lastSpotBySymbol = new Map<string, { price: number; at: number }>();
 
   constructor(private prisma: PrismaService, private market: MarketService, private telegram: TelegramService) {}
 
@@ -636,16 +636,22 @@ export class AiService implements OnModuleInit {
         // nhất, cao nhất] để không bỏ sót biến động giữa 2 lượt.
         const q = await this.market.quote(s.symbol).catch(() => null);
         const prev = this.lastSpotBySymbol.get(s.symbol);
+        const now = Math.floor(Date.now() / 1000);
         let cs: Candle[];
         if (q?.price != null) {
+          // QUAN TRỌNG — nến tổng hợp phải mang mốc thời gian ĐẦU khoảng (lúc lấy mẫu trước), không
+          // phải "bây giờ". Nó đại diện cho biến động giá trong khoảng [lượt quét trước → hiện tại];
+          // nếu gắn nhãn "bây giờ" thì một setup vừa được tạo xong cũng bị đem so với khoảng giá đã
+          // đi qua TRƯỚC KHI nó tồn tại, và bị báo chạm SL/TP ngay lập tức dù chưa hề chạy phút nào.
+          // Gắn đúng mốc đầu khoảng thì bộ lọc `c.time < startTs` bên dưới tự loại các setup mới.
           cs = prev != null
             ? [{
-                time: Math.floor(Date.now() / 1000),
-                open: prev, close: q.price,
-                high: Math.max(prev, q.price), low: Math.min(prev, q.price),
+                time: prev.at,
+                open: prev.price, close: q.price,
+                high: Math.max(prev.price, q.price), low: Math.min(prev.price, q.price),
               }]
             : [];
-          this.lastSpotBySymbol.set(s.symbol, q.price);
+          this.lastSpotBySymbol.set(s.symbol, { price: q.price, at: now });
         } else {
           cs = [];
         }
