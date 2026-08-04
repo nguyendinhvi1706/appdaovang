@@ -154,23 +154,33 @@ function previousDayLevels(c: Candle[]): { pdh: number; pdl: number } | null {
  *  7. SL dưới/trên điểm quét (không đặt sát FVG vì dễ bị quét)
  *  8. TP tại vùng thanh khoản kế tiếp theo cấu trúc, không theo số pip cố định
  */
-export function decideIctSetup(window: Candle[]): LiveSetup | null {
-  if (window.length < 300) return null; // cần đủ nến để dựng H4/Daily
+/** Kết quả chẩn đoán ICT: nếu không ra setup thì `step` cho biết BỊ CHẶN Ở BƯỚC NÀO.
+ *  Cần thiết vì chuỗi điều kiện ICT rất dài — nếu chỉ báo "đứng ngoài" chung chung thì không phân
+ *  biệt được "thuật toán đang lọc đúng" với "thuật toán chết, không bao giờ chạy tới cuối". */
+export type IctDiagnosis = { setup: LiveSetup | null; step: string };
+
+function ictInternal(window: Candle[]): IctDiagnosis {
+  const no = (step: string): IctDiagnosis => ({ setup: null, step });
+
+  if (window.length < 300) return no('Không đủ nến để dựng khung H4/Daily (cần ≥300 nến M15)');
   const m15 = window;
   const n = m15.length;
   const last = m15[n - 1];
   const spot = last.close;
-  if (!inKillzone(last.time)) return null;
+  const hourUtc = new Date(last.time * 1000).getUTCHours();
+  if (!inKillzone(last.time)) {
+    return no(`Ngoài Killzone — hiện ${hourUtc}h UTC, chỉ giao dịch London 07-10h hoặc New York 12-15h UTC`);
+  }
 
   const aRef = atrOf(m15) ?? spot * 0.005;
   const minSlDist = Math.max(aRef * 1.5, spot * 0.001);
   const swings = detectSwings(m15);
-  if (swings.length < 6) return null;
+  if (swings.length < 6) return no('Chưa đủ swing để đọc cấu trúc');
 
-  // ---- BƯỚC 1: Xu hướng khung lớn Daily + H4 ----
+  // ---- BƯỚC 1: Xu hướng Daily + H4 ----
   const h4 = aggregateBy(m15, 16);
   const d1 = aggregateBy(m15, 96);
-  if (h4.length < 20 || d1.length < 3) return null;
+  if (h4.length < 20 || d1.length < 3) return no('Chưa đủ nến H4/Daily');
 
   const h4Struct = detectStructure(h4, detectSwings(h4));
   const h4Ev = h4Struct[h4Struct.length - 1] ?? null;
@@ -179,23 +189,23 @@ export function decideIctSetup(window: Candle[]): LiveSetup | null {
   const h4Bull = h4Ev
     ? h4Ev.direction === 'bull'
     : (h4e20 != null && h4e50 != null ? h4e20 >= h4e50 : null);
-  if (h4Bull == null) return null;
+  if (h4Bull == null) return no('Không xác định được xu hướng H4');
 
-  // Daily xác nhận: giá hiện tại so với trung điểm ngày đã đóng gần nhất
   const dPrev = d1[d1.length - 2] ?? d1[d1.length - 1];
   const dMid = (dPrev.high + dPrev.low) / 2;
   const dailyBull = spot >= dMid;
-  if (h4Bull !== dailyBull) return null; // Daily và H4 mâu thuẫn → đứng ngoài
-
+  if (h4Bull !== dailyBull) {
+    return no(`Daily và H4 mâu thuẫn — H4 ${h4Bull ? 'tăng' : 'giảm'} nhưng giá đang ${dailyBull ? 'trên' : 'dưới'} trung điểm ngày trước`);
+  }
   const bull = h4Bull;
 
-  // ---- Premium/Discount (PD Array) ----
+  // ---- Premium / Discount ----
   const dr = dealingRange(m15, swings);
-  if (!dr) return null;
-  if (bull && spot >= dr.eq) return null;
-  if (!bull && spot <= dr.eq) return null;
+  if (!dr) return no('Chưa dựng được dealing range');
+  if (bull && spot >= dr.eq) return no('Xu hướng tăng nhưng giá đang ở nửa Premium — chỉ BUY ở nửa Discount');
+  if (!bull && spot <= dr.eq) return no('Xu hướng giảm nhưng giá đang ở nửa Discount — chỉ SELL ở nửa Premium');
 
-  // ---- BƯỚC 2: Draw on Liquidity — PDH/PDL + Equal High/Low + swing gần đây ----
+  // ---- BƯỚC 2: Draw on Liquidity ----
   const pd = previousDayLevels(m15);
   const eq = detectEqualLevels(m15, swings);
   const pools: number[] = [];
@@ -204,52 +214,54 @@ export function decideIctSetup(window: Candle[]): LiveSetup | null {
     if (bull && e.kind === 'EQL') pools.push(e.price);
     if (!bull && e.kind === 'EQH') pools.push(e.price);
   }
-  const recentSwings = swings.filter((s) => s.kind === (bull ? 'low' : 'high')).slice(-6);
-  for (const s of recentSwings) pools.push(s.price);
-  if (!pools.length) return null;
+  for (const s of swings.filter((x) => x.kind === (bull ? 'low' : 'high')).slice(-6)) pools.push(s.price);
+  if (!pools.length) return no('Không tìm được vùng thanh khoản (PDH/PDL, Equal High/Low, swing)');
 
-  // ---- BƯỚC 3: Liquidity Sweep — thủng mốc thanh khoản rồi ĐÓNG CỬA trở lại ----
-  const SWEEP_LOOKBACK = 24;
+  // ---- BƯỚC 3: Liquidity Sweep ----
   let sweepIdx = -1, sweepExtreme = 0;
-  for (let i = n - 1; i >= Math.max(0, n - SWEEP_LOOKBACK); i--) {
-    // Chỉ xét các mốc đã tồn tại TRƯỚC nến này (không nhìn trước)
-    const valid = pools.filter((lv) => (bull ? m15[i].low < lv && m15[i].close > lv
-                                             : m15[i].high > lv && m15[i].close < lv));
-    if (valid.length) { sweepIdx = i; sweepExtreme = bull ? m15[i].low : m15[i].high; break; }
+  for (let i = n - 1; i >= Math.max(0, n - 24); i--) {
+    const hit = pools.some((lv) => (bull ? m15[i].low < lv && m15[i].close > lv
+                                         : m15[i].high > lv && m15[i].close < lv));
+    if (hit) { sweepIdx = i; sweepExtreme = bull ? m15[i].low : m15[i].high; break; }
   }
-  if (sweepIdx < 0 || sweepIdx >= n - 2) return null;
+  if (sweepIdx < 0) return no('Chưa có cú quét thanh khoản nào trong 24 nến gần nhất');
+  if (sweepIdx >= n - 2) return no('Cú quét vừa xảy ra — chờ thêm nến để xem có phá cấu trúc không');
 
-  // ---- BƯỚC 4: MSS — cú đẩy phải phá swing ngược chiều gần nhất trước cú quét ----
+  // ---- BƯỚC 4: MSS ----
   const opposing = swings.filter((s) => s.index < sweepIdx && s.kind === (bull ? 'high' : 'low'));
-  if (!opposing.length) return null;
+  if (!opposing.length) return no('Không có swing ngược chiều trước cú quét để làm mốc phá cấu trúc');
   const mssLevel = opposing[opposing.length - 1].price;
   let mssIdx = -1;
   for (let i = sweepIdx + 1; i < n; i++) {
     if (bull ? m15[i].high > mssLevel : m15[i].low < mssLevel) { mssIdx = i; break; }
   }
-  if (mssIdx < 0) return null; // chưa phá cấu trúc → cú quét chỉ là nhiễu
+  if (mssIdx < 0) return no(`Đã quét thanh khoản nhưng CHƯA phá cấu trúc (cần vượt ${mssLevel.toFixed(2)}) — cú quét mới chỉ là nhiễu`);
 
-  // Displacement: cú đẩy tạo MSS phải đủ mạnh, không phải nhích qua vài giá
   const legEnd = bull
     ? Math.max(...m15.slice(sweepIdx, mssIdx + 1).map((x) => x.high))
     : Math.min(...m15.slice(sweepIdx, mssIdx + 1).map((x) => x.low));
-  if (Math.abs(legEnd - sweepExtreme) < aRef * 1.5) return null;
+  const disp = Math.abs(legEnd - sweepExtreme);
+  if (disp < aRef * 1.5) {
+    return no(`Cú đẩy sau quét quá yếu (${disp.toFixed(2)} < ${(aRef * 1.5).toFixed(2)} = 1.5×ATR) — chưa phải displacement`);
+  }
 
-  // ---- BƯỚC 5: FVG sinh ra TRONG cú đẩy phá cấu trúc (từ sweep tới ngay sau MSS) ----
+  // ---- BƯỚC 5: FVG trong cú đẩy ----
   const fvg = findFreshFvg(m15, sweepIdx, Math.min(mssIdx + 2, n - 1), bull);
-  if (!fvg) return null;
+  if (!fvg) return no('Cú đẩy không để lại FVG nào còn nguyên (hoặc đã bị giá lấp hết)');
 
-  // ---- BƯỚC 6: Entry tại FVG (CE — điểm giữa khoảng mất cân bằng) ----
+  // ---- BƯỚC 6: Entry tại CE của FVG ----
   const entry = (fvg.top + fvg.bottom) / 2;
-  if (bull ? entry >= spot : entry <= spot) return null; // giá đã lấp FVG rồi
+  if (bull ? entry >= spot : entry <= spot) {
+    return no(`Giá đã lấp qua vùng vào lệnh (FVG ở ${entry.toFixed(2)}, giá hiện tại ${spot.toFixed(2)}) — lỡ nhịp, chờ setup mới`);
+  }
 
-  // ---- BƯỚC 7: SL dưới đáy / trên đỉnh cú quét, KHÔNG đặt sát FVG ----
+  // ---- BƯỚC 7: SL ngoài điểm quét ----
   const buffer = aRef * 0.5;
   const sl = enforceMinStop(entry, bull ? sweepExtreme - buffer : sweepExtreme + buffer, bull, minSlDist);
   const slDist = Math.abs(entry - sl);
-  if (slDist <= 0) return null;
+  if (slDist <= 0) return no('Khoảng Stop Loss không hợp lệ');
 
-  // ---- BƯỚC 8: TP tại vùng thanh khoản KẾ TIẾP (PDH/PDL, Equal High/Low, đỉnh/đáy cũ) ----
+  // ---- BƯỚC 8: TP tại thanh khoản kế tiếp ----
   const targets: number[] = [];
   if (pd) targets.push(bull ? pd.pdh : pd.pdl);
   for (const e of eq) {
@@ -264,14 +276,31 @@ export function decideIctSetup(window: Candle[]): LiveSetup | null {
     .map((t) => ({ price: t, rr: Math.abs(t - entry) / slDist }))
     .filter((t) => t.rr >= minRR && t.rr <= maxRR)
     .sort((a, b) => a.rr - b.rr);
-  if (!valid.length) return null; // không có mục tiêu cấu trúc hợp lý → không vào lệnh
-  const tp = valid[0].price;
+  if (!valid.length) return no('Không có vùng thanh khoản nào cho RR hợp lý 1:1.5 - 1:8');
 
   return {
-    direction: bull ? 'BUY' : 'SELL',
-    entry, sl, tp,
-    rr: +(Math.abs(tp - entry) / slDist).toFixed(2),
+    setup: {
+      direction: bull ? 'BUY' : 'SELL',
+      entry, sl, tp: valid[0].price,
+      rr: +valid[0].rr.toFixed(2),
+    },
+    step: 'Đủ điều kiện',
   };
+}
+
+/**
+ * ICT — quy trình 8 bước: Daily+H4 bias → Draw on Liquidity (PDH/PDL, Equal High/Low)
+ * → Liquidity Sweep → MSS → FVG trong cú đẩy → Entry tại CE → SL ngoài điểm quét
+ * → TP tại thanh khoản kế tiếp.
+ */
+export function decideIctSetup(window: Candle[]): LiveSetup | null {
+  return ictInternal(window).setup;
+}
+
+/** Như decideIctSetup nhưng kèm lý do bị chặn — dùng để hiển thị cho người dùng biết thuật toán
+ *  đang dừng ở bước nào, thay vì chỉ báo "đứng ngoài" không rõ nguyên nhân. */
+export function diagnoseIct(window: Candle[]): IctDiagnosis {
+  return ictInternal(window);
 }
 
 /**

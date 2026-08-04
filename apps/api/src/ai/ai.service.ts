@@ -6,7 +6,7 @@ import { TelegramService } from '../telegram/telegram.service';
 import { atr, Candle, ema, rsi, swingLevels } from './indicators';
 import { detectStructure, detectSwings, Swing } from '../smc/smc.engine';
 // Dùng chung hàm với Backtest — bảo đảm logic chạy thật ĐÚNG BẰNG logic đã được đo lường
-import { decideIctSetup, decideLiveSetup } from '../backtest/live-setup.strategy';
+import { decideLiveSetup, diagnoseIct } from '../backtest/live-setup.strategy';
 
 export type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
@@ -507,14 +507,14 @@ export class AiService implements OnModuleInit {
       // Dùng LẠI ĐÚNG hàm đã chạy backtest (decideIctSetup) thay vì viết lại — để logic chạy thật và
       // logic được đo lường không bao giờ lệch nhau. Đây là bài học rút ra từ chính dự án này: trước
       // đây Backtest và Setup lệnh dùng hai bộ công thức khác nhau nên mọi con số backtest đều vô nghĩa.
-      const ictRaw = decideIctSetup(h1);
+      const ictDiag = diagnoseIct(h1);
+      const ictRaw = ictDiag.setup;
       if (!ictRaw) {
+        // Báo rõ BỊ CHẶN Ở BƯỚC NÀO thay vì liệt kê chung chung — để phân biệt "thuật toán đang lọc
+        // đúng" với "thuật toán hỏng, không bao giờ chạy tới cuối".
         return {
           noTrade: true,
-          reason:
-            'Chưa đủ điều kiện ICT: cần đồng thời (1) đang trong Killzone London 07-10h hoặc New York 12-15h giờ UTC, ' +
-            '(2) giá nằm đúng nửa Discount (để BUY) hoặc Premium (để SELL) của dealing range, ' +
-            '(3) vừa có cú quét thủng đáy/đỉnh cũ rồi đóng cửa ngược lại, và (4) giá chưa hồi qua mốc vào lệnh OTE 0.705. Đứng ngoài chờ.',
+          reason: `Chưa đủ điều kiện ICT — dừng ở bước: ${ictDiag.step}.`,
         };
       }
       // ICT tự xác định hướng từ xu hướng H1 + vị trí Premium/Discount, không nhận hướng ép từ ngoài.
