@@ -124,7 +124,7 @@ export class TelegramService implements OnModuleInit {
     if (!chatId) return;
     const dirIcon = setup.direction === 'BUY' ? '🟢 BUY' : '🔴 SELL';
     const methodLabel = setup.source.startsWith('SK') ? 'SK System (Fibonacci)'
-      : setup.source.startsWith('ICT') ? 'ICT (quét thanh khoản + Killzone) ⚠️ backtest cho kết quả LỖ'
+      : setup.source.startsWith('ICT') ? 'ICT (quét thanh khoản + Killzone) ⚠️ chưa kiểm chứng backtest'
       : setup.source.startsWith('SMC') ? 'SMC (Order Block/FVG)' : setup.source;
     const reasonShort = this.esc(setup.reasoning).slice(0, 400);
     const text =

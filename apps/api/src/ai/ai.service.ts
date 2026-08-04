@@ -78,7 +78,7 @@ export class AiService implements OnModuleInit {
     }, 15 * 60_000);
   }
 
-  /** Tự tạo setup (AUTO direction, cả 2 phương pháp SMC + SK) cho mọi user đã kết nối Telegram —
+  /** Tự tạo setup (AUTO direction, cả 3 phương pháp SMC + SK + ICT) cho mọi user đã kết nối Telegram —
    *  theo watchlist của họ (rơi về XAUUSD nếu watchlist trống). Bỏ qua symbol/phương pháp nào đã
    *  có setup PENDING/RUNNING để tránh spam trùng lặp; noTrade thì im lặng bỏ qua, không báo. */
   async autoGenerateSetups() {
@@ -94,11 +94,11 @@ export class AiService implements OnModuleInit {
         where: { userId: u.id, status: { in: ['PENDING', 'RUNNING'] } },
         select: { symbol: true, source: true },
       });
-      const hasOpen = (symbol: string, method: 'SMC' | 'SK') =>
+      const hasOpen = (symbol: string, method: 'SMC' | 'SK' | 'ICT') =>
         open.some((o) => o.symbol === symbol.toUpperCase() && o.source.startsWith(method));
 
       for (const symbol of symbols) {
-        for (const method of ['SMC', 'SK'] as const) {
+        for (const method of ['SMC', 'SK', 'ICT'] as const) {
           if (hasOpen(symbol, method)) { skippedOpen++; continue; }
           try {
             const res: any = await this.createSetup(u.id, symbol, 'AUTO', method);
@@ -533,8 +533,8 @@ export class AiService implements OnModuleInit {
       const ictDir = ictRaw.direction;
 
       templateReason =
-        `⚠️ CẢNH BÁO: phương pháp ICT này ĐÃ ĐƯỢC KIỂM CHỨNG BẰNG BACKTEST TRÊN DỮ LIỆU THẬT VÀ CHO KẾT QUẢ LỖ trên mọi khung thời gian. ` +
-        `Setup dưới đây chỉ để tham khảo/học tập, KHÔNG nên dùng để vào lệnh tiền thật. ` +
+        `⚠️ LƯU Ý: phương pháp ICT đã được viết lại hoàn toàn theo quy trình 8 bước và CHƯA ĐƯỢC KIỂM CHỨNG bằng backtest. ` +
+        `Chưa có bằng chứng nào cho thấy nó có lợi thế — hãy chạy Backtest trước khi tin dùng bằng tiền thật. ` +
         `Cấu trúc H1 ${trendClause}. ` +
         `Giá vừa quét thủng mốc thanh khoản cũ rồi đóng cửa ngược lại (stop hunt) trong Killzone, và đang ở nửa ${ictDir === 'BUY' ? 'Discount (dưới trung điểm)' : 'Premium (trên trung điểm)'} của dealing range. ` +
         `Chờ giá hồi về mốc OTE 0.705 tại ${entry.toFixed(2)} để vào ${ictDir}. ` +
@@ -543,7 +543,7 @@ export class AiService implements OnModuleInit {
 
       aiSystemMsg =
         'Bạn là chuyên gia phân tích ICT viết tiếng Việt. Nhiệm vụ DUY NHẤT: diễn giải lại một quyết định giao dịch ĐÃ CÓ SẴN thành 2-3 câu. ' +
-        'BẮT BUỘC nêu rõ ngay câu đầu rằng phương pháp này đã backtest ra kết quả LỖ và chỉ mang tính tham khảo. ' +
+        'BẮT BUỘC nêu rõ ngay câu đầu rằng phương pháp ICT này CHƯA được kiểm chứng bằng backtest, chỉ mang tính tham khảo. ' +
         'TUYỆT ĐỐI không đề xuất số liệu khác, không đổi entry/SL/TP đã cho.';
       aiUserMsg =
         `Setup đã được thuật toán ICT chốt — các con số là CUỐI CÙNG, không được đổi:\n` +
