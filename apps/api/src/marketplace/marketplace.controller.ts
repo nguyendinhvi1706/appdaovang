@@ -45,6 +45,12 @@ export class MarketplaceController {
     );
   }
 
+  /** Nạp sẵn các EA mẫu (trỏ file vào GitHub cho bền, không phụ thuộc đĩa tạm của Render). */
+  @Post('seed')
+  seed(@Request() req: any) {
+    return this.svc.seedSamples(req.user.id);
+  }
+
   @Delete(':id')
   remove(@Request() req: any, @Param('id') id: string) {
     return this.svc.remove(req.user.id, id);

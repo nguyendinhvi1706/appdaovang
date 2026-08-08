@@ -29,4 +29,8 @@ export function logout() {
   window.location.href = '/login';
 }
 
-export const uploadsUrl = (path: string) => `${API}${path}`;
+/** Link file: đường dẫn nội bộ (/uploads/...) thì ghép với API, còn link tuyệt đối (VD file trên
+ *  GitHub) thì giữ nguyên. Cần thiết vì đĩa của Render free tier là tạm — file upload sẽ MẤT mỗi
+ *  lần deploy lại, nên các sản phẩm mẫu trỏ thẳng vào GitHub cho bền. */
+export const uploadsUrl = (path: string) =>
+  /^https?:\/\//i.test(path) ? path : `${API}${path}`;

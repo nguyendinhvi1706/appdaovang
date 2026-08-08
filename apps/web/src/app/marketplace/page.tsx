@@ -39,6 +39,7 @@ export default function MarketplacePage() {
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [seeding, setSeeding] = useState(false);
 
   const load = useCallback(() => {
     const params = new URLSearchParams();
@@ -48,6 +49,22 @@ export default function MarketplacePage() {
   }, [cat, q]);
 
   useEffect(() => { load(); }, [load]);
+
+  /** Nạp sẵn 3 EA mẫu. File trỏ thẳng vào GitHub nên không mất khi Render deploy lại. */
+  async function seedSamples() {
+    setSeeding(true);
+    try {
+      const res = await api<{ created: number; skipped: number }>('/marketplace/seed', { method: 'POST' });
+      alert(res.created > 0
+        ? `Đã nạp ${res.created} EA mẫu vào Marketplace.`
+        : 'Các EA mẫu đã có sẵn rồi, không nạp trùng.');
+      load();
+    } catch (e: any) {
+      alert(e?.message || 'Không nạp được EA mẫu');
+    } finally {
+      setSeeding(false);
+    }
+  }
 
   async function publish(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -95,7 +112,14 @@ export default function MarketplacePage() {
     <AppShell>
       <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
         <h1 className="text-2xl font-bold">🛒 Marketplace</h1>
-        <button className="btn" onClick={() => setShowForm(!showForm)}>{showForm ? 'Đóng' : '+ Đăng sản phẩm'}</button>
+        <div className="flex gap-2">
+          <button className="px-3 py-2 rounded-lg border border-border hover:border-accent text-sm"
+            title="Nạp sẵn 3 EA mẫu (Setup A+, Breakout, DCA Grid) để tải về tự kiểm chứng trong MT5"
+            onClick={seedSamples} disabled={seeding}>
+            {seeding ? 'Đang nạp...' : '📦 Nạp EA mẫu'}
+          </button>
+          <button className="btn" onClick={() => setShowForm(!showForm)}>{showForm ? 'Đóng' : '+ Đăng sản phẩm'}</button>
+        </div>
       </div>
       <p className="text-sm text-gray-400 mb-4">100% miễn phí — cộng đồng chia sẻ công cụ cho nhau.</p>
 
