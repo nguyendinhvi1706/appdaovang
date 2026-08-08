@@ -56,3 +56,55 @@ Chạy **Strategy Tester** trên nhiều năm dữ liệu, chất lượng "Ever
 - Code chưa được biên dịch thử trong môi trường tạo ra nó — hãy compile và test kỹ.
 - Giao dịch có đòn bẩy có thể mất toàn bộ vốn.
 - Đây không phải lời khuyên đầu tư.
+
+---
+
+## AppDaoVang_Breakout.mq5
+
+EA phá vỡ biên độ bằng **Buy Stop / Sell Stop** theo cơ chế OCO (bên nào khớp thì huỷ bên kia).
+
+Đo biên độ theo một trong hai cách: **Donchian** (N nến gần nhất) hoặc **biên độ phiên** (ví dụ phiên Á 00:00–07:00 UTC, rồi đặt lệnh chờ khi London mở cửa). Đặt lệnh cách biên độ một khoảng đệm theo ATR, SL theo ATR, TP theo tỷ lệ RR.
+
+Kèm sẵn: tự tính lot theo % rủi ro, dời SL về hoà vốn khi đạt 1R, trailing stop theo ATR, giới hạn 1 lệnh/ngày, dừng khi lỗ quá X% trong ngày.
+
+Đây thuộc họ **theo đà (momentum)** — nhóm có bằng chứng học thuật tương đối vững nhất trong phân tích kỹ thuật. Nhưng "tương đối vững" không có nghĩa là chắc thắng, và lợi thế nếu có thường nhỏ. Vẫn phải tự backtest.
+
+---
+
+## AppDaoVang_DCA_Grid.mq5
+
+EA **DCA / Grid** có phanh cứng. Đọc kỹ phần dưới trước khi chạy.
+
+### Cảnh báo toán học — quan trọng hơn mọi tính năng
+
+DCA nhân hệ số cho **tỷ lệ thắng rất cao** và đường vốn rất đẹp. Đó không phải bằng chứng nó tốt — đó là bản chất của việc **đổi xác suất thắng cao lấy rủi ro thảm hoạ hiếm gặp**.
+
+Với hệ số nhân 1.3 và 6 tầng, tổng khối lượng khi đủ tầng gấp khoảng **6.7 lần** tầng đầu. Một xu hướng kéo dài không hồi sẽ chạm hết các tầng rồi tiếp tục đi — và mất mát ở tầng cuối lớn gấp nhiều lần toàn bộ lợi nhuận tích luỹ trước đó.
+
+Nói cách khác: **tỷ lệ thắng 95% vẫn có thể lỗ**, nếu 5% còn lại xoá sạch lãi của 95%. Khi đánh giá EA này, đừng nhìn Win Rate — nhìn **Max Drawdown**, **Profit Factor**, và đặc biệt là **điều gì xảy ra trong giai đoạn thị trường có xu hướng mạnh nhất** trong dữ liệu test.
+
+### Phanh cứng đã tích hợp
+
+| Cơ chế | Mặc định |
+|---|---|
+| **Cắt lỗ toàn rổ** khi lỗ quá % vốn | 10% |
+| Số tầng tối đa | 6 |
+| Dừng mở rổ mới khi lỗ trong ngày quá % | 5% |
+| Kiểm tra ký quỹ tự do trước khi thêm tầng | bắt buộc |
+| Bỏ qua khi spread giãn rộng | 100 points |
+
+**Không có chế độ nhân vô hạn.** Nếu bạn đặt `InpBasketStopLossPct = 0` (tắt cắt lỗ toàn rổ), EA sẽ in cảnh báo vào log — đó là cấu hình có thể mất toàn bộ vốn, và là cấu hình mà phần lớn "EA DCA thần thánh" bán trên mạng đang dùng để tạo ra backtest đẹp.
+
+### Bộ lọc vào lệnh
+
+Chỉ mở rổ Buy khi RSI dưới ngưỡng, mở rổ Sell khi RSI trên ngưỡng — tránh mở rổ ngược ngay giữa một cú chạy mạnh.
+
+---
+
+## Cách test cho đúng (áp dụng cho cả ba EA)
+
+1. **Dữ liệu thật, dài**: Strategy Tester, "Every tick based on real ticks", tối thiểu 2–3 năm, đúng broker bạn sẽ dùng
+2. **Đủ số lệnh**: dưới 100 lệnh thì mọi kết luận đều là nhiễu
+3. **Nhìn đúng chỉ số**: Profit Factor, Expectancy, Max Drawdown — không phải Win Rate
+4. **Chia đôi giai đoạn**: kết quả nửa sau có giống nửa đầu không? Nếu chỉ nửa đầu đẹp thì đó là khớp nhiễu quá khứ, thực chiến sẽ thua
+5. **Đừng tối ưu tham số cho tới khi đẹp**: thử đủ nhiều tổ hợp thì luôn tìm được bộ số cho lãi trên quá khứ. Đó là cái bẫy phổ biến nhất, và là lý do phần lớn EA có backtest đẹp lại cháy tài khoản khi chạy thật.
