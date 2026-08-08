@@ -1,0 +1,246 @@
+//@version=5
+// =====================================================================
+//  AppDaoVang — SK System (Golden Pocket)
+//  Xu hướng H4+H1 → Impulse 0→A → Golden Pocket 0.705-0.786
+//  → XÁC NHẬN (nến từ chối / phá cấu trúc ngắn hạn) → Entry
+//  → SL dưới điểm 0 → TP: đỉnh A, rồi Extension 1.272 / 1.414 / 1.618
+//
+//  Điểm mấu chốt: Golden Pocket chỉ là VỊ TRÍ, không phải tín hiệu.
+//  Chỉ báo này bắt buộc phải có xác nhận mới báo vào lệnh.
+// =====================================================================
+indicator("AppDaoVang — SK System (Golden Pocket)", overlay = true,
+     max_boxes_count = 200, max_lines_count = 300, max_labels_count = 150)
+
+grpS = "Sóng"
+lb          = input.int(3,   "Số nến 2 bên xác nhận swing", minval = 1, maxval = 10, group = grpS)
+atrLen      = input.int(14,  "ATR", minval = 2, group = grpS)
+minImpulse  = input.float(2.0, "Impulse tối thiểu = x ATR", step = 0.5, group = grpS)
+
+grpG = "Golden Pocket"
+gpNearLvl = input.float(0.705, "Mốc gần đỉnh A", step = 0.001, group = grpG)
+gpFarLvl  = input.float(0.786, "Mốc xa đỉnh A",  step = 0.001, group = grpG)
+
+grpC = "Xác nhận"
+confirmBars   = input.int(6, "Xác nhận phải xảy ra trong N nến gần nhất", minval = 1, group = grpC)
+needRejection = input.bool(true, "Chấp nhận nến từ chối mạnh", group = grpC)
+needBos       = input.bool(true, "Chấp nhận phá cấu trúc ngắn hạn", group = grpC)
+
+grpR = "Rủi ro"
+bufferAtr = input.float(0.5, "Đệm SL ngoài điểm 0 = x ATR", step = 0.1, group = grpR)
+minSlAtr  = input.float(1.5, "SL tối thiểu = x ATR", step = 0.1, group = grpR)
+minRR     = input.float(2.0, "RR tối thiểu (SK yêu cầu 1:2)", step = 0.1, group = grpR)
+
+grpV = "Hiển thị"
+showFib  = input.bool(true, "Vẽ Fibonacci và Golden Pocket", group = grpV)
+showExt  = input.bool(true, "Vẽ Extension 1.272/1.414/1.618", group = grpV)
+alertOn  = input.bool(true, "Bật cảnh báo", group = grpV)
+
+atr = ta.atr(atrLen)
+
+// ---------------- Xu hướng H4 và H1 phải CÙNG chiều ----------------
+f_trendEma() =>
+    e20 = ta.ema(close, 20)
+    e50 = ta.ema(close, 50)
+    e20 >= e50 ? 1 : -1
+
+h4 = request.security(syminfo.tickerid, "240", f_trendEma(), lookahead = barmerge.lookahead_off)
+h1 = request.security(syminfo.tickerid, "60",  f_trendEma(), lookahead = barmerge.lookahead_off)
+aligned = h4 == h1
+isBull  = aligned and h4 ==  1
+isBear  = aligned and h4 == -1
+
+// ---------------- Impulse 0 → A ----------------
+ph = ta.pivothigh(high, lb, lb)
+pl = ta.pivotlow(low,  lb, lb)
+
+var float p0    = na       // gốc sóng
+var float pA    = na       // đỉnh sóng
+var int   p0Bar = na
+var int   pABar = na
+
+// Sóng tăng: điểm 0 là đáy, A là đỉnh sau đó
+if isBull
+    if not na(pl)
+        // đáy mới thấp hơn hoặc chưa có sóng → đặt lại gốc
+        if na(p0) or pl < p0 or not na(pA)
+            p0    := pl
+            p0Bar := bar_index - lb
+            pA    := na
+            pABar := na
+    if not na(ph) and not na(p0) and ph > p0
+        if na(pA) or ph > pA
+            pA    := ph
+            pABar := bar_index - lb
+
+if isBear
+    if not na(ph)
+        if na(p0) or ph > p0 or not na(pA)
+            p0    := ph
+            p0Bar := bar_index - lb
+            pA    := na
+            pABar := na
+    if not na(pl) and not na(p0) and pl < p0
+        if na(pA) or pl < pA
+            pA    := pl
+            pABar := bar_index - lb
+
+rangeSize   = not na(p0) and not na(pA) ? math.abs(pA - p0) : na
+validImpulse = not na(rangeSize) and rangeSize >= atr * minImpulse
+
+// ---------------- Golden Pocket ----------------
+f_fib(float r) => isBull ? pA - r * rangeSize : pA + r * rangeSize
+
+gpNear = validImpulse ? f_fib(gpNearLvl) : na
+gpFar  = validImpulse ? f_fib(gpFarLvl)  : na
+gpTop  = isBull ? gpNear : gpFar
+gpBot  = isBull ? gpFar  : gpNear
+
+var box gpBox = na
+if showFib and validImpulse and barstate.islast and not na(gpTop)
+    if not na(gpBox)
+        box.delete(gpBox)
+    gpBox := box.new(pABar, gpTop, bar_index + 15, gpBot,
+         border_color = color.new(color.orange, 40),
+         bgcolor = color.new(color.orange, 88))
+    label.new(bar_index + 15, (gpTop + gpBot) / 2, "Golden Pocket\n0.705 – 0.786",
+         style = label.style_label_left, color = color.new(color.orange, 70),
+         textcolor = color.orange, size = size.tiny)
+
+// Vẽ đường sóng 0→A
+var line waveLine = na
+if showFib and validImpulse and barstate.islast
+    if not na(waveLine)
+        line.delete(waveLine)
+    waveLine := line.new(p0Bar, p0, pABar, pA, color = color.new(color.blue, 30), width = 2)
+
+// ---------------- Giá đã hồi vào Golden Pocket chưa, và chưa phá điểm 0 ----------------
+touchedGp = validImpulse and not na(gpTop) and
+     (isBull ? (low <= gpTop and low >= gpBot - atr * 0.3)
+             : (high >= gpBot and high <= gpTop + atr * 0.3))
+
+var bool inGp = false
+if touchedGp
+    inGp := true
+// Phá điểm 0 → sóng vô hiệu
+brokeOrigin = validImpulse and (isBull ? low < p0 : high > p0)
+if brokeOrigin
+    inGp := false
+    p0   := na
+    pA   := na
+
+// ---------------- XÁC NHẬN ----------------
+// (a) Nến từ chối: râu đâm vào GP nhưng đóng cửa bật ra ngoài, thân nghiêng đúng hướng
+span = high - low
+posInBar = span > 0 ? (close - low) / span : 0.5
+rejBull = needRejection and isBull and low <= gpTop and close > gpTop and posInBar >= 0.5
+rejBear = needRejection and isBear and high >= gpBot and close < gpBot and posInBar <= 0.5
+
+// (b) Phá cấu trúc ngắn hạn: vượt swing ngược chiều gần nhất hình thành SAU đỉnh A
+var float microLevel = na
+if not na(pABar)
+    if isBull and not na(ph) and bar_index - lb > pABar
+        microLevel := ph
+    if isBear and not na(pl) and bar_index - lb > pABar
+        microLevel := pl
+
+bosBull = needBos and isBull and not na(microLevel) and high > microLevel
+bosBear = needBos and isBear and not na(microLevel) and low  < microLevel
+
+confirmed = inGp and validImpulse and ((rejBull or bosBull) or (rejBear or bosBear))
+
+plotshape(touchedGp and not confirmed, title = "Chạm GP (chưa xác nhận)",
+     style = shape.circle, location = location.absolute, color = color.new(color.orange, 30),
+     size = size.tiny)
+
+// ---------------- Tín hiệu ----------------
+var float sigEntry = na
+var float sigSl    = na
+var float sigTp    = na
+var float sigRr    = na
+var int   sigDir   = 0
+
+fireBuy  = confirmed and isBull
+fireSell = confirmed and isBear
+
+if fireBuy or fireSell
+    bull  = fireBuy
+    entry = close
+    minDist = math.max(atr * minSlAtr, close * 0.001)
+    slRaw = bull ? p0 - atr * bufferAtr : p0 + atr * bufferAtr
+    sl    = math.abs(entry - slRaw) >= minDist ? slRaw : (bull ? entry - minDist : entry + minDist)
+    slDist = math.abs(entry - sl)
+
+    // Thang mục tiêu: đỉnh A → Extension 1.272 / 1.414 / 1.618
+    t1 = pA
+    t2 = bull ? p0 + 1.272 * rangeSize : p0 - 1.272 * rangeSize
+    t3 = bull ? p0 + 1.414 * rangeSize : p0 - 1.414 * rangeSize
+    t4 = bull ? p0 + 1.618 * rangeSize : p0 - 1.618 * rangeSize
+
+    float chosen = na
+    float chosenRr = na
+    if slDist > 0
+        for t in array.from(t1, t2, t3, t4)
+            ok = bull ? t > entry : t < entry
+            if ok
+                rr = math.abs(t - entry) / slDist
+                if rr >= minRR and rr <= 8.0 and na(chosen)
+                    chosen   := t
+                    chosenRr := rr
+
+    if not na(chosen)
+        sigEntry := entry
+        sigSl    := sl
+        sigTp    := chosen
+        sigRr    := chosenRr
+        sigDir   := bull ? 1 : -1
+
+        line.new(bar_index, entry,  bar_index + 20, entry,  color = color.yellow, width = 2)
+        line.new(bar_index, sl,     bar_index + 20, sl,     color = color.red,   width = 2, style = line.style_dashed)
+        line.new(bar_index, chosen, bar_index + 20, chosen, color = color.green, width = 2, style = line.style_dashed)
+        label.new(bar_index + 20, entry,
+             (bull ? "BUY " : "SELL ") + str.tostring(entry, format.mintick) +
+             "\nSL " + str.tostring(sl, format.mintick) +
+             "\nTP " + str.tostring(chosen, format.mintick) +
+             "\nRR 1:" + str.tostring(chosenRr, "#.##"),
+             style = label.style_label_left,
+             color = bull ? color.new(color.green, 20) : color.new(color.red, 20),
+             textcolor = color.white, size = size.small)
+
+plotshape(fireBuy,  title = "SK Buy",  style = shape.labelup,   location = location.belowbar,
+     color = color.new(color.lime, 0), textcolor = color.black, text = "SK BUY",  size = size.small)
+plotshape(fireSell, title = "SK Sell", style = shape.labeldown, location = location.abovebar,
+     color = color.new(color.red, 0),  textcolor = color.white, text = "SK SELL", size = size.small)
+
+// Extension
+if showExt and validImpulse and barstate.islast
+    for r in array.from(1.272, 1.414, 1.618)
+        lvl = isBull ? p0 + r * rangeSize : p0 - r * rangeSize
+        line.new(bar_index - 30, lvl, bar_index + 15, lvl,
+             color = color.new(color.green, 65), style = line.style_dotted)
+        label.new(bar_index + 15, lvl, "Ext " + str.tostring(r),
+             style = label.style_label_left, color = color.new(color.green, 90),
+             textcolor = color.green, size = size.tiny)
+
+if alertOn and sigDir != 0 and (fireBuy or fireSell)
+    alert("SK Golden Pocket " + (sigDir == 1 ? "BUY" : "SELL") +
+         " | Entry " + str.tostring(sigEntry, format.mintick) +
+         " | SL " + str.tostring(sigSl, format.mintick) +
+         " | TP " + str.tostring(sigTp, format.mintick), alert.freq_once_per_bar_close)
+
+// ---------------- Bảng trạng thái ----------------
+var table info = table.new(position.top_right, 2, 5, border_width = 1)
+if barstate.islast
+    table.cell(info, 0, 0, "H4 / H1", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 0, aligned ? (isBull ? "Cùng TĂNG ✓" : "Cùng GIẢM ✓") : "Mâu thuẫn ✗",
+         text_color = aligned ? (isBull ? color.lime : color.red) : color.gray, text_size = size.small)
+    table.cell(info, 0, 1, "Impulse", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 1, validImpulse ? str.tostring(rangeSize, format.mintick) + " ✓" : "Chưa đủ mạnh",
+         text_color = validImpulse ? color.lime : color.gray, text_size = size.small)
+    table.cell(info, 0, 2, "Vào Golden Pocket", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 2, inGp ? "Rồi ✓" : "Chưa",
+         text_color = inGp ? color.orange : color.gray, text_size = size.small)
+    table.cell(info, 0, 3, "Xác nhận", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 3, confirmed ? "CÓ ✓" : "Chưa — chỉ chạm vùng",
+         text_color = confirmed ? color.lime : color.orange, text_size = size.small)
+    table.cell(info, 0, 4, "RR tối thiểu", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 4, "1:" + str.tostring(minRR), text_color = color.white, text_size = size.small)

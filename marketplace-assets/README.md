@@ -101,6 +101,38 @@ Chỉ mở rổ Buy khi RSI dưới ngưỡng, mở rổ Sell khi RSI trên ngư
 
 ---
 
+## Chỉ báo TradingView (Pine Script v5)
+
+Ba chỉ báo vẽ lại đúng chuỗi điều kiện của ba phương pháp. Chúng **không dự đoán** — chỉ hiển thị rõ từng bước để bạn tự nhìn và tự đánh giá.
+
+| File | Vẽ gì |
+|---|---|
+| `AppDaoVang_SetupAPlus.pine` | Xu hướng H4 (HH+HL), PDH/PDL, cú quét thanh khoản, CHOCH, Order Block, FVG, và Entry/SL/TP khi đủ hợp lưu |
+| `AppDaoVang_SK_GoldenPocket.pine` | Sóng Impulse 0→A, vùng **Golden Pocket 0.705–0.786**, tín hiệu xác nhận, Extension 1.272/1.414/1.618 |
+| `AppDaoVang_ICT.pine` | Tô nền **Killzone** London/New York, PDH/PDL, Premium/Discount, Sweep → MSS → FVG → Entry tại CE |
+
+### Cài đặt
+
+1. Mở TradingView → mở biểu đồ → **Pine Editor** (thanh dưới cùng)
+2. Xoá nội dung mẫu, dán toàn bộ nội dung file `.pine` vào
+3. Bấm **Save**, đặt tên → bấm **Add to chart**
+
+### Điểm đáng chú ý
+
+Cả ba đều có **bảng trạng thái ở góc phải trên** cho biết đang **dừng ở bước nào**. Ví dụ ICT sẽ hiện "Ngoài giờ ✗" khi ngoài Killzone, "Mâu thuẫn ✗" khi Daily và H4 ngược nhau, "Chưa đủ ✗" khi cú đẩy sau sweep quá yếu.
+
+Bảng này quan trọng hơn mũi tên tín hiệu: nó cho bạn thấy phương pháp đang lọc cái gì, thay vì chỉ thấy "không có tín hiệu" mà không hiểu vì sao.
+
+Riêng chỉ báo SK phân biệt rõ hai trạng thái: **chạm Golden Pocket** (chấm tròn cam) và **đã có xác nhận** (nhãn SK BUY/SELL). Đây chính là điểm mà tài liệu SK nhấn mạnh — Golden Pocket chỉ là *vị trí*, không phải tín hiệu vào lệnh.
+
+### Lưu ý kỹ thuật
+
+- Viết bằng **Pine Script v5**. Nếu TradingView báo lỗi cú pháp, gửi lại thông báo lỗi để sửa.
+- Xu hướng khung lớn dùng `request.security` với `lookahead_off` — **không nhìn trước tương lai**, nên tín hiệu hiển thị trên lịch sử là tín hiệu thật sự có được tại thời điểm đó.
+- Chỉ báo dùng dữ liệu của TradingView (thường là OANDA/FXCM), có thể lệch nhẹ so với broker bạn dùng.
+
+---
+
 ## Cách test cho đúng (áp dụng cho cả ba EA)
 
 1. **Dữ liệu thật, dài**: Strategy Tester, "Every tick based on real ticks", tối thiểu 2–3 năm, đúng broker bạn sẽ dùng

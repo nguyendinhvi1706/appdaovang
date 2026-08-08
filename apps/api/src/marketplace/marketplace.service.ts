@@ -130,6 +130,74 @@ export class MarketplaceService {
       },
     ];
 
+    //--- Chỉ báo TradingView (Pine Script) ---
+    samples.push({
+      category: 'INDICATOR' as MarketCategoryVal,
+      title: 'TradingView — Setup A+ (SMC) [Pine]',
+      description: 'Vẽ PDH/PDL, cú quét thanh khoản, CHOCH, Order Block, FVG và Entry/SL/TP khi đủ hợp lưu. Có bảng trạng thái cho biết đang dừng ở bước nào.',
+      fileName: 'AppDaoVang_SetupAPlus.pine',
+      content: [
+        'CÀI ĐẶT: TradingView → Pine Editor → dán code → Save → Add to chart',
+        '',
+        'CHỈ BÁO VẼ GÌ:',
+        '- Xu hướng H4 theo HH+HL / LL+LH (không dùng EMA)',
+        '- Đường PDH/PDL (đỉnh/đáy ngày hôm trước)',
+        '- Đánh dấu SWEEP khi giá thủng mốc thanh khoản rồi đóng cửa trở lại',
+        '- Đánh dấu CHOCH khi phá cấu trúc — chưa phá thì cú quét chỉ là nhiễu',
+        '- Vẽ Order Block và FVG, chỉ báo tín hiệu khi hai vùng LIỀN KỀ nhau',
+        '- Vẽ Entry / SL / TP kèm tỷ lệ RR',
+        '',
+        'BẢNG TRẠNG THÁI (góc phải trên) cho biết đang dừng ở bước nào — quan trọng hơn mũi tên,',
+        'vì nó cho bạn thấy phương pháp đang lọc cái gì thay vì chỉ thấy "không có tín hiệu".',
+        '',
+        'Dùng lookahead_off nên tín hiệu trên lịch sử là tín hiệu THẬT SỰ có được lúc đó,',
+        'không phải vẽ lại sau khi biết kết quả.',
+      ].join('\n'),
+    });
+    samples.push({
+      category: 'INDICATOR' as MarketCategoryVal,
+      title: 'TradingView — SK System Golden Pocket [Pine]',
+      description: 'Vẽ sóng Impulse 0→A, vùng Golden Pocket 0.705–0.786, phân biệt rõ "chạm vùng" với "đã có xác nhận", kèm Extension 1.272/1.414/1.618.',
+      fileName: 'AppDaoVang_SK_GoldenPocket.pine',
+      content: [
+        'CÀI ĐẶT: TradingView → Pine Editor → dán code → Save → Add to chart',
+        '',
+        'ĐIỂM QUAN TRỌNG NHẤT của chỉ báo này:',
+        'Nó phân biệt rõ HAI trạng thái mà đa số người mới nhầm lẫn —',
+        '  • Chấm tròn cam = giá mới CHẠM Golden Pocket (chỉ là VỊ TRÍ, chưa phải tín hiệu)',
+        '  • Nhãn SK BUY/SELL = đã có XÁC NHẬN (nến từ chối mạnh hoặc phá cấu trúc ngắn hạn)',
+        '',
+        'Vào lệnh chỉ vì giá chạm mốc Fibonacci là sai lầm phổ biến nhất khi dùng phương pháp này.',
+        '',
+        'CÁC ĐIỀU KIỆN KHÁC:',
+        '- H4 và H1 phải CÙNG chiều, mâu thuẫn thì không báo',
+        '- Impulse 0→A phải mạnh tối thiểu 2×ATR',
+        '- SL đặt ngoài ĐIỂM 0 (gốc sóng), không nằm trong Golden Pocket',
+        '- TP theo thang: đỉnh A → Extension 1.272 / 1.414 / 1.618, yêu cầu RR tối thiểu 1:2',
+      ].join('\n'),
+    });
+    samples.push({
+      category: 'INDICATOR' as MarketCategoryVal,
+      title: 'TradingView — ICT Killzone + Sweep + MSS [Pine]',
+      description: 'Tô nền Killzone London/New York, vẽ PDH/PDL, Premium/Discount, và chuỗi Sweep → MSS → FVG → Entry tại CE.',
+      fileName: 'AppDaoVang_ICT.pine',
+      content: [
+        'CÀI ĐẶT: TradingView → Pine Editor → dán code → Save → Add to chart',
+        '',
+        'CHỈ BÁO VẼ GÌ:',
+        '- Tô nền Killzone: London 07-10h và New York 12-15h (giờ UTC)',
+        '- Đường PDH/PDL và đường Equilibrium (chia Premium/Discount)',
+        '- Đánh dấu SWEEP và MSS, kèm kiểm tra Displacement tối thiểu 1.5×ATR',
+        '- Vẽ FVG sinh ra trong cú đẩy, entry tại CE (điểm giữa FVG)',
+        '',
+        'BẢNG TRẠNG THÁI 6 dòng cho biết chính xác đang dừng ở bước nào:',
+        'Killzone → Daily/H4 → Premium/Discount → Sweep → MSS+Displacement → ATR',
+        '',
+        'LƯU Ý: ICT lọc theo giờ nên phần lớn thời gian trong ngày sẽ KHÔNG có tín hiệu.',
+        'Đó là đúng thiết kế. Giờ Việt Nam tương ứng: 14-17h và 19-22h.',
+      ].join('\n'),
+    });
+
     let created = 0, skipped = 0;
     for (const s of samples) {
       const exists = await this.prisma.marketItem.findFirst({ where: { title: s.title } });

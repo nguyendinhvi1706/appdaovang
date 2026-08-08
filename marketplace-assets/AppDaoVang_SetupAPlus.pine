@@ -1,0 +1,257 @@
+//@version=5
+// =====================================================================
+//  AppDaoVang — Setup A+ (SMC)
+//  Sweep thanh khoản → CHOCH → Order Block + FVG hợp lưu → Pullback
+//
+//  Chỉ báo này VẼ LẠI điều kiện, KHÔNG dự đoán và KHÔNG hứa lợi nhuận.
+//  Mục đích: nhìn thấy rõ từng bước để tự đánh giá phương pháp.
+// =====================================================================
+indicator("AppDaoVang — Setup A+ (SMC)", overlay = true,
+     max_boxes_count = 300, max_lines_count = 300, max_labels_count = 200)
+
+// ---------------- Tham số ----------------
+grpS = "Cấu trúc"
+lb            = input.int(2,   "Số nến 2 bên xác nhận swing", minval = 1, maxval = 10, group = grpS)
+sweepLookback = input.int(24,  "Tìm cú quét trong N nến gần nhất", minval = 5, group = grpS)
+atrLen        = input.int(14,  "ATR", minval = 2, group = grpS)
+confluenceAtr = input.float(0.5, "OB và FVG phải cách nhau ≤ x ATR", step = 0.1, group = grpS)
+
+grpR = "Rủi ro / Mục tiêu"
+minSlAtr = input.float(1.5, "SL tối thiểu = x ATR", step = 0.1, group = grpR)
+bufferAtr= input.float(0.5, "Đệm SL ngoài điểm quét = x ATR", step = 0.1, group = grpR)
+minRR    = input.float(1.5, "RR tối thiểu", step = 0.1, group = grpR)
+maxRR    = input.float(8.0, "RR tối đa",    step = 0.5, group = grpR)
+
+grpV = "Hiển thị"
+showLiq   = input.bool(true, "Vẽ vùng thanh khoản (PDH/PDL, swing)", group = grpV)
+showOB    = input.bool(true, "Vẽ Order Block", group = grpV)
+showFVG   = input.bool(true, "Vẽ FVG",          group = grpV)
+showLevels= input.bool(true, "Vẽ Entry / SL / TP", group = grpV)
+alertOn   = input.bool(true, "Bật cảnh báo",   group = grpV)
+
+atr = ta.atr(atrLen)
+
+// ---------------- Xu hướng H4: HH+HL / LL+LH ----------------
+f_trend() =>
+    ph = ta.pivothigh(high, lb, lb)
+    pl = ta.pivotlow(low,  lb, lb)
+    var float h1 = na, var float h2 = na
+    var float l1 = na, var float l2 = na
+    if not na(ph)
+        h2 := h1
+        h1 := ph
+    if not na(pl)
+        l2 := l1
+        l1 := pl
+    hh = not na(h1) and not na(h2) and h1 > h2
+    hl = not na(l1) and not na(l2) and l1 > l2
+    ll = not na(l1) and not na(l2) and l1 < l2
+    lh = not na(h1) and not na(h2) and h1 < h2
+    hh and hl ? 1 : ll and lh ? -1 : 0
+
+h4Trend = request.security(syminfo.tickerid, "240", f_trend(), lookahead = barmerge.lookahead_off)
+isBull  = h4Trend ==  1
+isBear  = h4Trend == -1
+
+// ---------------- Swing trên khung hiện tại ----------------
+ph = ta.pivothigh(high, lb, lb)
+pl = ta.pivotlow(low,  lb, lb)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+var int   lastSwingHighBar = na
+var int   lastSwingLowBar  = na
+
+if not na(ph)
+    lastSwingHigh    := ph
+    lastSwingHighBar := bar_index - lb
+if not na(pl)
+    lastSwingLow    := pl
+    lastSwingLowBar  := bar_index - lb
+
+// ---------------- PDH / PDL ----------------
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead = barmerge.lookahead_off)
+pdl = request.security(syminfo.tickerid, "D", low[1],  lookahead = barmerge.lookahead_off)
+
+if showLiq and barstate.islast
+    line.new(bar_index - 100, pdh, bar_index + 20, pdh, color = color.new(color.red, 40),
+         style = line.style_dashed, width = 1)
+    line.new(bar_index - 100, pdl, bar_index + 20, pdl, color = color.new(color.green, 40),
+         style = line.style_dashed, width = 1)
+    label.new(bar_index + 20, pdh, "PDH", style = label.style_label_left,
+         color = color.new(color.red, 80), textcolor = color.red, size = size.tiny)
+    label.new(bar_index + 20, pdl, "PDL", style = label.style_label_left,
+         color = color.new(color.green, 80), textcolor = color.green, size = size.tiny)
+
+// ---------------- BƯỚC 3: Liquidity Sweep ----------------
+// Quét = thủng mốc thanh khoản rồi ĐÓNG CỬA trở lại bên trong
+sweepBuy  = isBull and not na(lastSwingLow)  and low  < lastSwingLow  and close > lastSwingLow
+sweepSell = isBear and not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+sweepPdlBuy  = isBull and not na(pdl) and low  < pdl and close > pdl
+sweepPdhSell = isBear and not na(pdh) and high > pdh and close < pdh
+
+isSweepBuy  = sweepBuy  or sweepPdlBuy
+isSweepSell = sweepSell or sweepPdhSell
+
+var int   sweepBar     = na
+var float sweepExtreme = na
+var int   sweepDir     = 0        // 1 = chuẩn bị Buy, -1 = chuẩn bị Sell
+var float chochLevel   = na
+
+if isSweepBuy
+    sweepBar     := bar_index
+    sweepExtreme := low
+    sweepDir     := 1
+    chochLevel   := lastSwingHigh
+if isSweepSell
+    sweepBar     := bar_index
+    sweepExtreme := high
+    sweepDir     := -1
+    chochLevel   := lastSwingLow
+
+// Cú quét hết hạn nếu quá lâu không có CHOCH
+if not na(sweepBar) and bar_index - sweepBar > sweepLookback
+    sweepDir := 0
+
+plotshape(isSweepBuy,  title = "Sweep Buy",  style = shape.triangleup,
+     location = location.belowbar, color = color.new(color.aqua, 0), size = size.tiny, text = "SWEEP")
+plotshape(isSweepSell, title = "Sweep Sell", style = shape.triangledown,
+     location = location.abovebar, color = color.new(color.orange, 0), size = size.tiny, text = "SWEEP")
+
+// ---------------- BƯỚC 4: CHOCH ----------------
+chochBuy  = sweepDir ==  1 and not na(chochLevel) and high > chochLevel
+chochSell = sweepDir == -1 and not na(chochLevel) and low  < chochLevel
+
+var int chochBar = na
+if chochBuy or chochSell
+    chochBar := bar_index
+
+plotshape(chochBuy,  title = "CHOCH Buy",  style = shape.labelup,
+     location = location.belowbar, color = color.new(color.lime, 0),
+     textcolor = color.black, text = "CHOCH", size = size.tiny)
+plotshape(chochSell, title = "CHOCH Sell", style = shape.labeldown,
+     location = location.abovebar, color = color.new(color.fuchsia, 0),
+     textcolor = color.white, text = "CHOCH", size = size.tiny)
+
+// ---------------- BƯỚC 5-6: Order Block + FVG ----------------
+// OB = nến ngược chiều CUỐI CÙNG trước cú đẩy phá cấu trúc
+f_findOB(bool bull, int fromBar) =>
+    float obTop = na
+    float obBot = na
+    int   obIdx = na
+    if not na(fromBar)
+        maxBack = math.min(bar_index - fromBar + 10, 40)
+        for i = 1 to maxBack
+            bearish = close[i] < open[i]
+            if (bull and bearish) or (not bull and not bearish)
+                obTop := math.max(open[i], close[i])
+                obBot := math.min(open[i], close[i])
+                obIdx := bar_index - i
+                break
+    [obTop, obBot, obIdx]
+
+// FVG 3 nến (khoảng mất cân bằng)
+fvgBullTop = low
+fvgBullBot = high[2]
+fvgBearTop = low[2]
+fvgBearBot = high
+hasFvgBull = low > high[2]
+hasFvgBear = high < low[2]
+
+var box[] obBoxes  = array.new_box()
+var box[] fvgBoxes = array.new_box()
+
+if showFVG and hasFvgBull and isBull
+    b = box.new(bar_index - 2, fvgBullTop, bar_index + 8, fvgBullBot,
+         border_color = color.new(color.teal, 60), bgcolor = color.new(color.teal, 85))
+    array.push(fvgBoxes, b)
+if showFVG and hasFvgBear and isBear
+    b = box.new(bar_index - 2, fvgBearTop, bar_index + 8, fvgBearBot,
+         border_color = color.new(color.maroon, 60), bgcolor = color.new(color.maroon, 85))
+    array.push(fvgBoxes, b)
+
+// ---------------- BƯỚC 7-10: Tổng hợp tín hiệu ----------------
+var float sigEntry = na
+var float sigSl    = na
+var float sigTp    = na
+var int   sigDir   = 0
+
+if chochBuy or chochSell
+    bull = chochBuy
+    [obTop, obBot, obIdx] = f_findOB(bull, sweepBar)
+    if not na(obTop)
+        // FVG gần nhất trong cú đẩy
+        float fTop = na
+        float fBot = na
+        for i = 0 to math.min(bar_index - sweepBar + 2, 40)
+            if bull and low[i] > high[i + 2]
+                fTop := low[i]
+                fBot := high[i + 2]
+                break
+            if not bull and high[i] < low[i + 2]
+                fTop := low[i + 2]
+                fBot := high[i]
+                break
+
+        if not na(fTop)
+            gap = bull ? (fBot - obTop) : (obBot - fTop)
+            if gap <= atr * confluenceAtr
+                entry = bull ? obTop : obBot
+                minDist = math.max(atr * minSlAtr, close * 0.001)
+                slRaw = bull ? sweepExtreme - atr * bufferAtr : sweepExtreme + atr * bufferAtr
+                sl = math.abs(entry - slRaw) >= minDist ? slRaw : (bull ? entry - minDist : entry + minDist)
+                slDist = math.abs(entry - sl)
+
+                // TP tại thanh khoản đối diện: ưu tiên PDH/PDL rồi tới swing
+                float tgt = bull ? (na(pdh) ? lastSwingHigh : pdh) : (na(pdl) ? lastSwingLow : pdl)
+                if not na(tgt) and slDist > 0
+                    rr = math.abs(tgt - entry) / slDist
+                    if rr >= minRR and rr <= maxRR
+                        sigEntry := entry
+                        sigSl    := sl
+                        sigTp    := tgt
+                        sigDir   := bull ? 1 : -1
+
+                        if showOB
+                            bo = box.new(obIdx, obTop, bar_index + 12, obBot,
+                                 border_color = bull ? color.new(color.lime, 30) : color.new(color.red, 30),
+                                 bgcolor = bull ? color.new(color.lime, 88) : color.new(color.red, 88))
+                            array.push(obBoxes, bo)
+
+                        if showLevels
+                            line.new(bar_index, entry, bar_index + 20, entry,
+                                 color = color.yellow, width = 2)
+                            line.new(bar_index, sl, bar_index + 20, sl,
+                                 color = color.red, width = 2, style = line.style_dashed)
+                            line.new(bar_index, tgt, bar_index + 20, tgt,
+                                 color = color.green, width = 2, style = line.style_dashed)
+                            label.new(bar_index + 20, entry,
+                                 (bull ? "BUY " : "SELL ") + str.tostring(entry, format.mintick) +
+                                 "\nSL " + str.tostring(sl, format.mintick) +
+                                 "\nTP " + str.tostring(tgt, format.mintick) +
+                                 "\nRR 1:" + str.tostring(rr, "#.##"),
+                                 style = label.style_label_left,
+                                 color = bull ? color.new(color.green, 20) : color.new(color.red, 20),
+                                 textcolor = color.white, size = size.small)
+
+sigFired = sigDir != 0 and (chochBuy or chochSell)
+if alertOn and sigFired
+    alert("Setup A+ " + (sigDir == 1 ? "BUY" : "SELL") +
+         " | Entry " + str.tostring(sigEntry, format.mintick) +
+         " | SL " + str.tostring(sigSl, format.mintick) +
+         " | TP " + str.tostring(sigTp, format.mintick), alert.freq_once_per_bar_close)
+
+// ---------------- Bảng trạng thái ----------------
+var table info = table.new(position.top_right, 2, 4, border_width = 1)
+if barstate.islast
+    table.cell(info, 0, 0, "Xu hướng H4", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 0, isBull ? "TĂNG (HH+HL)" : isBear ? "GIẢM (LL+LH)" : "Không rõ",
+         text_color = isBull ? color.lime : isBear ? color.red : color.gray, text_size = size.small)
+    table.cell(info, 0, 1, "Cú quét", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 1, sweepDir == 0 ? "Chưa có" : (sweepDir == 1 ? "Sell-side ✓" : "Buy-side ✓"),
+         text_color = sweepDir == 0 ? color.gray : color.aqua, text_size = size.small)
+    table.cell(info, 0, 2, "CHOCH", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 2, na(chochBar) ? "Chưa" : "Đã phá ✓",
+         text_color = na(chochBar) ? color.gray : color.lime, text_size = size.small)
+    table.cell(info, 0, 3, "ATR", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 3, str.tostring(atr, format.mintick), text_color = color.white, text_size = size.small)

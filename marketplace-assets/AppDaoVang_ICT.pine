@@ -1,0 +1,249 @@
+//@version=5
+// =====================================================================
+//  AppDaoVang — ICT (Killzone + Liquidity Sweep + MSS + FVG)
+//
+//  Quy trình 8 bước:
+//   1. Bias Daily + H4    2. Draw on Liquidity (PDH/PDL, Equal H/L)
+//   3. Liquidity Sweep    4. MSS (phá cấu trúc)
+//   5. FVG trong cú đẩy   6. Entry tại CE của FVG
+//   7. SL ngoài điểm quét 8. TP tại thanh khoản kế tiếp
+//
+//  Kèm Killzone (London 07-10, New York 12-15 UTC) và Premium/Discount.
+// =====================================================================
+indicator("AppDaoVang — ICT", overlay = true,
+     max_boxes_count = 300, max_lines_count = 300, max_labels_count = 200)
+
+grpK = "Killzone (giờ UTC)"
+useKz     = input.bool(true, "Chỉ tìm setup trong Killzone", group = grpK)
+lonStart  = input.int(7,  "London bắt đầu",  minval = 0, maxval = 23, group = grpK)
+lonEnd    = input.int(10, "London kết thúc", minval = 0, maxval = 23, group = grpK)
+nyStart   = input.int(12, "New York bắt đầu",  minval = 0, maxval = 23, group = grpK)
+nyEnd     = input.int(15, "New York kết thúc", minval = 0, maxval = 23, group = grpK)
+shadeKz   = input.bool(true, "Tô nền Killzone", group = grpK)
+
+grpS = "Cấu trúc"
+lb           = input.int(2,  "Số nến 2 bên xác nhận swing", minval = 1, maxval = 10, group = grpS)
+atrLen       = input.int(14, "ATR", minval = 2, group = grpS)
+dispAtr      = input.float(1.5, "Displacement tối thiểu = x ATR", step = 0.1, group = grpS)
+sweepExpire  = input.int(24, "Cú quét hết hạn sau N nến", minval = 5, group = grpS)
+drLookback   = input.int(60, "Dealing range: N nến gần nhất", minval = 20, group = grpS)
+
+grpR = "Rủi ro"
+bufferAtr = input.float(0.5, "Đệm SL ngoài điểm quét = x ATR", step = 0.1, group = grpR)
+minSlAtr  = input.float(1.5, "SL tối thiểu = x ATR", step = 0.1, group = grpR)
+minRR     = input.float(1.5, "RR tối thiểu", step = 0.1, group = grpR)
+maxRR     = input.float(8.0, "RR tối đa", step = 0.5, group = grpR)
+
+grpV = "Hiển thị"
+showPd   = input.bool(true, "Vẽ PDH/PDL", group = grpV)
+showEq   = input.bool(true, "Vẽ Premium/Discount", group = grpV)
+showFvg  = input.bool(true, "Vẽ FVG", group = grpV)
+alertOn  = input.bool(true, "Bật cảnh báo", group = grpV)
+
+atr = ta.atr(atrLen)
+h   = hour(time, "UTC")
+
+inLondon = h >= lonStart and h < lonEnd
+inNy     = h >= nyStart  and h < nyEnd
+inKz     = inLondon or inNy
+kzOk     = not useKz or inKz
+
+bgcolor(shadeKz and inLondon ? color.new(color.blue, 92) : na, title = "London KZ")
+bgcolor(shadeKz and inNy     ? color.new(color.purple, 92) : na, title = "New York KZ")
+
+// ---------------- BƯỚC 1: Bias Daily + H4 ----------------
+f_trendEma() =>
+    e20 = ta.ema(close, 20)
+    e50 = ta.ema(close, 50)
+    e20 >= e50 ? 1 : -1
+
+h4Bias = request.security(syminfo.tickerid, "240", f_trendEma(), lookahead = barmerge.lookahead_off)
+dHigh  = request.security(syminfo.tickerid, "D", high[1], lookahead = barmerge.lookahead_off)
+dLow   = request.security(syminfo.tickerid, "D", low[1],  lookahead = barmerge.lookahead_off)
+dMid   = (dHigh + dLow) / 2
+dailyBias = close >= dMid ? 1 : -1
+
+biasAligned = h4Bias == dailyBias
+isBull = biasAligned and h4Bias ==  1
+isBear = biasAligned and h4Bias == -1
+
+// ---------------- BƯỚC 2: Draw on Liquidity ----------------
+if showPd and barstate.islast
+    line.new(bar_index - 120, dHigh, bar_index + 20, dHigh,
+         color = color.new(color.red, 30), style = line.style_dashed)
+    line.new(bar_index - 120, dLow, bar_index + 20, dLow,
+         color = color.new(color.green, 30), style = line.style_dashed)
+    label.new(bar_index + 20, dHigh, "PDH", style = label.style_label_left,
+         color = color.new(color.red, 85), textcolor = color.red, size = size.tiny)
+    label.new(bar_index + 20, dLow, "PDL", style = label.style_label_left,
+         color = color.new(color.green, 85), textcolor = color.green, size = size.tiny)
+
+// ---------------- Premium / Discount ----------------
+drHigh = ta.highest(high, drLookback)
+drLow  = ta.lowest(low, drLookback)
+drEq   = (drHigh + drLow) / 2
+
+plot(showEq ? drEq : na, "Equilibrium", color = color.new(color.gray, 30), style = plot.style_linebr)
+
+inDiscount = close < drEq
+inPremium  = close > drEq
+pdOk = (isBull and inDiscount) or (isBear and inPremium)
+
+// ---------------- Swing ----------------
+ph = ta.pivothigh(high, lb, lb)
+pl = ta.pivotlow(low,  lb, lb)
+
+var float lastSwHigh = na
+var float lastSwLow  = na
+if not na(ph)
+    lastSwHigh := ph
+if not na(pl)
+    lastSwLow := pl
+
+// ---------------- BƯỚC 3: Liquidity Sweep ----------------
+sweptLowLvl  = not na(lastSwLow)  and low  < lastSwLow  and close > lastSwLow
+sweptPdl     = not na(dLow)  and low  < dLow  and close > dLow
+sweptHighLvl = not na(lastSwHigh) and high > lastSwHigh and close < lastSwHigh
+sweptPdh     = not na(dHigh) and high > dHigh and close < dHigh
+
+sweepBuy  = isBull and (sweptLowLvl  or sweptPdl)
+sweepSell = isBear and (sweptHighLvl or sweptPdh)
+
+var int   swBar = na
+var float swExt = na
+var int   swDir = 0
+var float mssLvl = na
+
+if sweepBuy
+    swBar  := bar_index
+    swExt  := low
+    swDir  := 1
+    mssLvl := lastSwHigh
+if sweepSell
+    swBar  := bar_index
+    swExt  := high
+    swDir  := -1
+    mssLvl := lastSwLow
+
+if not na(swBar) and bar_index - swBar > sweepExpire
+    swDir := 0
+
+plotshape(sweepBuy,  title = "Sweep (sell-side)", style = shape.triangleup,
+     location = location.belowbar, color = color.new(color.aqua, 0), size = size.tiny, text = "SWEEP")
+plotshape(sweepSell, title = "Sweep (buy-side)",  style = shape.triangledown,
+     location = location.abovebar, color = color.new(color.orange, 0), size = size.tiny, text = "SWEEP")
+
+// ---------------- BƯỚC 4: MSS + Displacement ----------------
+mssBuy  = swDir ==  1 and not na(mssLvl) and high > mssLvl
+mssSell = swDir == -1 and not na(mssLvl) and low  < mssLvl
+
+legEnd = swDir == 1 ? ta.highest(high, math.max(bar_index - swBar + 1, 1))
+     : swDir == -1 ? ta.lowest(low, math.max(bar_index - swBar + 1, 1)) : na
+displacement = not na(legEnd) and not na(swExt) ? math.abs(legEnd - swExt) : na
+dispOk = not na(displacement) and displacement >= atr * dispAtr
+
+plotshape(mssBuy and dispOk,  title = "MSS Buy",  style = shape.labelup,
+     location = location.belowbar, color = color.new(color.lime, 0),
+     textcolor = color.black, text = "MSS", size = size.tiny)
+plotshape(mssSell and dispOk, title = "MSS Sell", style = shape.labeldown,
+     location = location.abovebar, color = color.new(color.fuchsia, 0),
+     textcolor = color.white, text = "MSS", size = size.tiny)
+
+// ---------------- BƯỚC 5: FVG trong cú đẩy ----------------
+fvgBull = low > high[2]
+fvgBear = high < low[2]
+
+if showFvg and fvgBull and swDir == 1
+    box.new(bar_index - 2, low, bar_index + 10, high[2],
+         border_color = color.new(color.teal, 50), bgcolor = color.new(color.teal, 88))
+if showFvg and fvgBear and swDir == -1
+    box.new(bar_index - 2, low[2], bar_index + 10, high,
+         border_color = color.new(color.maroon, 50), bgcolor = color.new(color.maroon, 88))
+
+// ---------------- BƯỚC 6-8: Tín hiệu ----------------
+var float sigEntry = na
+var float sigSl    = na
+var float sigTp    = na
+var int   sigDir   = 0
+
+fire = kzOk and pdOk and dispOk and ((mssBuy and isBull) or (mssSell and isBear))
+
+if fire
+    bull = mssBuy
+    // Tìm FVG gần nhất trong cú đẩy (từ nến quét tới hiện tại)
+    float fTop = na
+    float fBot = na
+    maxBack = math.min(bar_index - swBar + 2, 40)
+    for i = 0 to maxBack
+        if bull and low[i] > high[i + 2]
+            fTop := low[i]
+            fBot := high[i + 2]
+            break
+        if not bull and high[i] < low[i + 2]
+            fTop := low[i + 2]
+            fBot := high[i]
+            break
+
+    if not na(fTop)
+        entry = (fTop + fBot) / 2          // CE — điểm giữa FVG
+        // Giá phải CHƯA quay lại lấp vùng vào lệnh
+        okSide = bull ? entry < close : entry > close
+        if okSide
+            minDist = math.max(atr * minSlAtr, close * 0.001)
+            slRaw = bull ? swExt - atr * bufferAtr : swExt + atr * bufferAtr
+            sl = math.abs(entry - slRaw) >= minDist ? slRaw : (bull ? entry - minDist : entry + minDist)
+            slDist = math.abs(entry - sl)
+
+            float tgt = bull ? (na(dHigh) ? lastSwHigh : dHigh) : (na(dLow) ? lastSwLow : dLow)
+            if not na(tgt) and slDist > 0
+                rr = math.abs(tgt - entry) / slDist
+                if rr >= minRR and rr <= maxRR
+                    sigEntry := entry
+                    sigSl    := sl
+                    sigTp    := tgt
+                    sigDir   := bull ? 1 : -1
+
+                    line.new(bar_index, entry, bar_index + 20, entry, color = color.yellow, width = 2)
+                    line.new(bar_index, sl,    bar_index + 20, sl,    color = color.red,   width = 2, style = line.style_dashed)
+                    line.new(bar_index, tgt,   bar_index + 20, tgt,   color = color.green, width = 2, style = line.style_dashed)
+                    label.new(bar_index + 20, entry,
+                         (bull ? "ICT BUY " : "ICT SELL ") + str.tostring(entry, format.mintick) +
+                         "\nSL " + str.tostring(sl, format.mintick) +
+                         "\nTP " + str.tostring(tgt, format.mintick) +
+                         "\nRR 1:" + str.tostring(rr, "#.##"),
+                         style = label.style_label_left,
+                         color = bull ? color.new(color.green, 20) : color.new(color.red, 20),
+                         textcolor = color.white, size = size.small)
+
+                    if alertOn
+                        alert("ICT " + (bull ? "BUY" : "SELL") +
+                             " | Entry " + str.tostring(entry, format.mintick) +
+                             " | SL " + str.tostring(sl, format.mintick) +
+                             " | TP " + str.tostring(tgt, format.mintick),
+                             alert.freq_once_per_bar_close)
+
+// ---------------- Bảng trạng thái: cho biết ĐANG DỪNG Ở BƯỚC NÀO ----------------
+var table info = table.new(position.top_right, 2, 6, border_width = 1)
+if barstate.islast
+    table.cell(info, 0, 0, "Killzone", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 0, inLondon ? "London ✓" : inNy ? "New York ✓" : "Ngoài giờ ✗",
+         text_color = inKz ? color.lime : color.gray, text_size = size.small)
+
+    table.cell(info, 0, 1, "Daily / H4", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 1, biasAligned ? (isBull ? "Cùng TĂNG ✓" : "Cùng GIẢM ✓") : "Mâu thuẫn ✗",
+         text_color = biasAligned ? (isBull ? color.lime : color.red) : color.gray, text_size = size.small)
+
+    table.cell(info, 0, 2, "Premium/Discount", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 2, pdOk ? (inDiscount ? "Discount ✓" : "Premium ✓") : "Sai nửa ✗",
+         text_color = pdOk ? color.lime : color.orange, text_size = size.small)
+
+    table.cell(info, 0, 3, "Liquidity Sweep", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 3, swDir == 0 ? "Chưa có" : "Đã quét ✓",
+         text_color = swDir == 0 ? color.gray : color.aqua, text_size = size.small)
+
+    table.cell(info, 0, 4, "MSS + Displacement", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 4, dispOk ? "Đủ mạnh ✓" : "Chưa đủ ✗",
+         text_color = dispOk ? color.lime : color.orange, text_size = size.small)
+
+    table.cell(info, 0, 5, "ATR", text_color = color.gray, text_size = size.small)
+    table.cell(info, 1, 5, str.tostring(atr, format.mintick), text_color = color.white, text_size = size.small)
